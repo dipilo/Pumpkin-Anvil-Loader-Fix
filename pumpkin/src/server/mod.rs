@@ -186,7 +186,10 @@ impl Server {
             default_data
         });
 
-        let seed = level_info.world_gen_settings.seed;
+        let seed = level_info
+            .world_gen_settings
+            .as_ref()
+            .map_or_else(|| basic_config.seed.0 as i64, |wgs| wgs.seed);
         let level_info = Arc::new(ArcSwap::new(Arc::new(level_info)));
 
         let listing = Mutex::new(CachedStatus::new(&basic_config));
@@ -382,7 +385,12 @@ impl Server {
             let l_info = server.level_info.clone();
             let weak = Arc::downgrade(&server);
             let config = Arc::new(server.advanced_config.world.clone());
-            let seed = server.level_info.load().world_gen_settings.seed;
+            let seed = server
+                .level_info
+                .load()
+                .world_gen_settings
+                .as_ref()
+                .map_or_else(|| server.basic_config.seed.0 as i64, |wgs| wgs.seed);
 
             // TODO: gen_pool should be reused
             let level = pumpkin_world::dimension::into_level(

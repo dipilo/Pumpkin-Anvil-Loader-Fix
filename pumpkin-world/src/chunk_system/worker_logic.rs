@@ -144,7 +144,7 @@ pub async fn io_read_work(
                         }
                     }
                 }
-                LoadedData::Missing(pos) | LoadedData::Error((pos, _)) => {
+                LoadedData::Missing(pos) => {
                     if send
                         .send((
                             pos,
@@ -158,6 +158,12 @@ pub async fn io_read_work(
                     {
                         break;
                     }
+                }
+                LoadedData::Error((pos, err)) => {
+                    error!(
+                        "Failed to load chunk at {:?}: {}. Skipping regeneration to preserve world data.",
+                        pos, err
+                    );
                 }
             }
         }

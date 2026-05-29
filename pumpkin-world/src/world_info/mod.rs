@@ -61,7 +61,8 @@ pub struct LevelData {
     pub difficulty_locked: bool,
     #[serde(default)]
     pub game_rules: GameRuleRegistry,
-    pub world_gen_settings: WorldGenSettings,
+    #[serde(default)]
+    pub world_gen_settings: Option<WorldGenSettings>,
     #[serde(default)]
     pub last_played: i64,
     #[serde(default = "default_level_name")]
@@ -317,7 +318,7 @@ impl LevelData {
             difficulty: DEFAULT_DIFFICULTY,
             difficulty_locked: false,
             game_rules: GameRuleRegistry::default(),
-            world_gen_settings: WorldGenSettings::new(seed),
+            world_gen_settings: Some(WorldGenSettings::new(seed)),
             last_played: -1,
             level_name: DEFAULT_LEVEL_NAME.to_string(),
             spawn_x: 0,

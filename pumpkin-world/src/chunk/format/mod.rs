@@ -170,7 +170,7 @@ impl ChunkData {
             },
             light_engine: std::sync::Mutex::new(light_engine),
             light_populated: AtomicBool::new(chunk_data.light_correct),
-            status: chunk_data.status,
+            status: chunk_data.status.unwrap_or(ChunkStatus::Full),
             blending_data: None,
         })
     }
@@ -214,7 +214,7 @@ impl ChunkData {
             x_pos: self.x,
             z_pos: self.z,
             min_y_section: section_coords::block_to_section(self.section.min_y),
-            status: &self.status,
+            status: Some(&self.status),
             heightmaps: &heightmap_lock,
             sections,
             block_ticks: &self.block_ticks.to_vec(),
@@ -480,7 +480,8 @@ struct ChunkNbt {
     z_pos: i32,
     #[serde(rename = "yPos")]
     min_y_section: i32,
-    status: ChunkStatus,
+    #[serde(default)]
+    status: Option<ChunkStatus>,
     #[serde(rename = "sections")]
     sections: Vec<ChunkSectionNBT>,
     heightmaps: ChunkHeightmaps,
@@ -504,7 +505,7 @@ struct ChunkNbtRef<'a> {
     z_pos: i32,
     #[serde(rename = "yPos")]
     min_y_section: i32,
-    status: &'a ChunkStatus,
+    status: Option<&'a ChunkStatus>,
     #[serde(rename = "sections")]
     sections: Vec<ChunkSectionNbtRef<'a>>,
     heightmaps: &'a ChunkHeightmaps,

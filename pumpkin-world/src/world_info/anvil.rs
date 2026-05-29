@@ -14,10 +14,11 @@ use crate::world_info::{
     MINIMUM_SUPPORTED_LEVEL_VERSION, MINIMUM_SUPPORTED_WORLD_DATA_VERSION,
 };
 
-use super::{LevelData, WorldInfoError, WorldInfoReader, WorldInfoWriter};
+use super::{LevelData, WorldGenSettings, WorldInfoError, WorldInfoReader, WorldInfoWriter};
 
 pub const LEVEL_DAT_FILE_NAME: &str = "level.dat";
 pub const LEVEL_DAT_BACKUP_FILE_NAME: &str = "level.dat_old";
+pub const WORLD_GEN_SETTINGS_FILE_NAME: &str = "data/minecraft/world_gen_settings.dat";
 
 pub struct AnvilLevelInfo;
 
@@ -79,6 +80,23 @@ fn check_file_level_version(raw_nbt: &[u8]) -> Result<(), WorldInfoError> {
     }
 }
 
+fn read_world_gen_settings(level_folder: &Path) ->
+Result<Option<WorldGenSettings>, WorldInfoError> {
+    let path = level_folder.join(WORLD_GEN_SETTINGS_FILE_NAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let file = File::open(path)?;
+    let mut buf = Vec::new();
+    GzDecoder::new(file).read_to_end(&mut buf)?;
+
+    let settings: WorldGenSettings = pumpkin_nbt::from_bytes(Cursor::new(buf))
+        .map_err(|e| WorldInfoError::DeserializationError(e.to_string()))?;
+    
+    Ok(Some(settings))
+}
+
 impl WorldInfoReader for AnvilLevelInfo {
     fn read_world_info(&self, level_folder: &Path) -> Result<LevelData, WorldInfoError> {
         let path = level_folder.join(LEVEL_DAT_FILE_NAME);
@@ -89,8 +107,14 @@ impl WorldInfoReader for AnvilLevelInfo {
 
         check_file_data_version(&buf)?;
         check_file_level_version(&buf)?;
-        let info = pumpkin_nbt::from_bytes::<LevelDat>(Cursor::new(buf))
+        let mut info = pumpkin_nbt::from_bytes::<LevelDat>(Cursor::new(buf))
             .map_err(|e| WorldInfoError::DeserializationError(e.to_string()))?;
+
+        // Minecraft 26.1+ moved WorldGenSettings out of level.dat into a separate file
+        if info.data.world_gen_settings.is_none()
+            && let Some(settings) = read_world_gen_settings(level_folder)? {
+                info.data.world_gen_settings = Some(settings);
+            }
 
         // TODO: check version
 
@@ -168,7 +192,7 @@ mod test {
 
         let data = AnvilLevelInfo.read_world_info(temp_dir.path()).unwrap();
 
-        assert_eq!(data.world_gen_settings.seed, seed);
+        assert_eq!(data.world_gen_settings.as_ref().unwrap().seed, seed);
     }
 
     static LEVEL_DAT: LazyLock<LevelDat> = LazyLock::new(|| LevelDat {
@@ -226,7 +250,7 @@ mod test {
                 water_source_conversion: true,
                 ..Default::default()
             },
-            world_gen_settings: WorldGenSettings::new(Seed(1)),
+            world_gen_settings: Some(WorldGenSettings::new(Seed(1))),
             last_played: 1733847709327,
             level_name: "New World".to_string(),
             spawn_x: 160,
