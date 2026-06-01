@@ -128,10 +128,32 @@ const fn default_level_version() -> i32 {
     MAXIMUM_SUPPORTED_LEVEL_VERSION
 }
 
+// Partial world-gen settings found in level.dat for 26.1+ worlds
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct WorldGenSettings {
     // the numerical seed of the world
     pub seed: i64,
+    #[serde(default)]
+    pub bonus_chest: bool,
+    #[serde(default = "default_generate_features")]
+    pub generate_features: bool,
+    #[serde(default)]
+    pub dimensions: Dimensions,
+}
+
+const fn default_generate_features() -> bool {
+    true
+}
+
+/// The schema used by the external `data/minecraft/world_gen_settings.dat` (26.1+)
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct ExternalWorldGenSettings {
+    #[serde(rename = "data")]
+    pub data: ExternalWorldGenData,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct ExternalWorldGenData {
     pub dimensions: Dimensions,
 }
 
@@ -269,6 +291,8 @@ impl WorldGenSettings {
         Self {
             dimensions,
             seed: seed.0 as i64,
+            bonus_chest: false,
+            generate_features: true,
         }
     }
 }

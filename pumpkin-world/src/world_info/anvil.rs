@@ -14,7 +14,7 @@ use crate::world_info::{
     MINIMUM_SUPPORTED_LEVEL_VERSION, MINIMUM_SUPPORTED_WORLD_DATA_VERSION,
 };
 
-use super::{LevelData, WorldGenSettings, WorldInfoError, WorldInfoReader, WorldInfoWriter};
+use super::{ExternalWorldGenSettings, LevelData, WorldGenSettings, WorldInfoError, WorldInfoReader, WorldInfoWriter};
 
 pub const LEVEL_DAT_FILE_NAME: &str = "level.dat";
 pub const LEVEL_DAT_BACKUP_FILE_NAME: &str = "level.dat_old";
@@ -81,7 +81,7 @@ fn check_file_level_version(raw_nbt: &[u8]) -> Result<(), WorldInfoError> {
 }
 
 fn read_world_gen_settings(level_folder: &Path) ->
-Result<Option<WorldGenSettings>, WorldInfoError> {
+Result<Option<ExternalWorldGenSettings>, WorldInfoError> {
     let path = level_folder.join(WORLD_GEN_SETTINGS_FILE_NAME);
     if !path.exists() {
         return Ok(None);
@@ -91,7 +91,7 @@ Result<Option<WorldGenSettings>, WorldInfoError> {
     let mut buf = Vec::new();
     GzDecoder::new(file).read_to_end(&mut buf)?;
 
-    let settings: WorldGenSettings = pumpkin_nbt::from_bytes(Cursor::new(buf))
+    let settings: ExternalWorldGenSettings = pumpkin_nbt::from_bytes(Cursor::new(buf))
         .map_err(|e| WorldInfoError::DeserializationError(e.to_string()))?;
     
     Ok(Some(settings))
@@ -110,10 +110,29 @@ impl WorldInfoReader for AnvilLevelInfo {
         let mut info = pumpkin_nbt::from_bytes::<LevelDat>(Cursor::new(buf))
             .map_err(|e| WorldInfoError::DeserializationError(e.to_string()))?;
 
-        // Minecraft 26.1+ moved WorldGenSettings out of level.dat into a separate file
-        if info.data.world_gen_settings.is_none()
-            && let Some(settings) = read_world_gen_settings(level_folder)? {
-                info.data.world_gen_settings = Some(settings);
+        // Minecraft 26.1+ moved dimensions out of level.dat into a separate file.
+        //    Read dimensions from external file and merge.
+        let has_external_dimensions = info.data.world_gen_settings.is_none()
+            || info.data.world_gen_settings.as_ref().is_some_and(|wgs| wgs.dimensions.is_empty());
+
+        if has_external_dimensions
+            && let Some(external) = read_world_gen_settings(level_folder)? {
+                match &mut info.data.world_gen_settings {
+                    Some(wgs) => {
+                        // 26.1+: merge external dimensions into partial level.dat settings
+                        wgs.dimensions = external.data.dimensions;
+                    }
+                    None => {
+                        // Edge case: level.dat has no WorldGenSettings at all,
+                        // but external file exists. Construct minimal settings.
+                        info.data.world_gen_settings = Some(WorldGenSettings {
+                            seed: 0, // fallback; server/mod.rs will override with basic_config.seed
+                            bonus_chest: false,
+                            generate_features: true,
+                            dimensions: external.data.dimensions,
+                        });
+                    }
+                }
             }
 
         // TODO: check version
@@ -250,7 +269,11 @@ mod test {
                 water_source_conversion: true,
                 ..Default::default()
             },
-            world_gen_settings: Some(WorldGenSettings::new(Seed(1))),
+            world_gen_settings: Some({
+                let mut wgs = WorldGenSettings::new(Seed(1));
+                wgs.generate_features = false;
+                wgs
+            }),
             last_played: 1733847709327,
             level_name: "New World".to_string(),
             spawn_x: 160,

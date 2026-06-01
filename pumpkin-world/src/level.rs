@@ -18,7 +18,7 @@ use crate::{
 };
 use arc_swap::ArcSwap;
 use dashmap::{DashMap, Entry};
-use pumpkin_config::{chunk::ChunkConfig, lighting::LightingEngineConfig, world::LevelConfig};
+use pumpkin_config::{chunk::{AnvilChunkConfig, ChunkConfig}, lighting::LightingEngineConfig, world::LevelConfig};
 use pumpkin_data::biome::Biome;
 use pumpkin_data::dimension::Dimension;
 use pumpkin_data::{Block, block_properties::has_random_ticks, fluid::Fluid};
@@ -138,6 +138,28 @@ impl Level {
         std::fs::create_dir_all(&region_folder).expect("Failed to create Region folder");
         std::fs::create_dir_all(&entities_folder).expect("Failed to create Entities folder");
 
+        // Auto-detect existing world formats
+        fn has_extension(folder: &PathBuf, ext: &str) -> bool {
+            std::fs::read_dir(folder)
+                .map(|mut entries| {
+                    entries.any(|e| {
+                        e.map(|entry| entry.file_name().to_string_lossy().ends_with(ext))
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        }
+
+        let chunk_config = if has_extension(&region_folder, ".mca") {
+            tracing::info!("Detected Anvil format, using Anvil chunk loader");
+            ChunkConfig::Anvil(AnvilChunkConfig::default())
+        } else if has_extension(&region_folder, ".linear") {
+            tracing::info!("Detected Linear format, using Linear chunk loader");
+            ChunkConfig::Linear
+        } else {
+            level_config.chunk.clone()
+        };
+
         let level_folder = Arc::new(LevelFolder {
             root_folder,
             region_folder,
@@ -147,14 +169,14 @@ impl Level {
         let seed = Seed(seed as u64);
         let world_gen = get_world_gen(seed, dimension).into();
 
-        let chunk_saver: Arc<dyn FileIO<Data = SyncChunk>> = match &level_config.chunk {
+        let chunk_saver: Arc<dyn FileIO<Data = SyncChunk>> = match &chunk_config {
             ChunkConfig::Linear => Arc::new(ChunkFileManager::<LinearV2File<ChunkData>>::new(())),
             ChunkConfig::Anvil(config) => Arc::new(
                 ChunkFileManager::<AnvilChunkFile<ChunkData>>::new(config.clone()),
             ),
             ChunkConfig::Pump => Arc::new(ChunkFileManager::<PumpFile<ChunkData>>::new(())),
         };
-        let entity_saver: Arc<dyn FileIO<Data = SyncEntityChunk>> = match &level_config.chunk {
+        let entity_saver: Arc<dyn FileIO<Data = SyncEntityChunk>> = match &chunk_config {
             ChunkConfig::Linear => {
                 Arc::new(ChunkFileManager::<LinearV2File<ChunkEntityData>>::new(()))
             }
