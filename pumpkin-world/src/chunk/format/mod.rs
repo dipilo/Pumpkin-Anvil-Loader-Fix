@@ -80,9 +80,105 @@ impl ChunkData {
         chunk_data: &[u8],
         position: Vector2<i32>,
     ) -> Result<Self, ChunkParsingError> {
-        let chunk_data =
-            pumpkin_nbt::from_bytes_unnamed::<ChunkNbt>(std::io::Cursor::new(chunk_data))
-                .map_err(|e| ChunkParsingError::ErrorDeserializingChunk(e.to_string()))?;
+        tracing::trace!(
+            "Chunk decode start at {:?}, {} bytes",
+            position,
+            chunk_data.len()
+        );
+
+        // First, inspect the raw root compound shape.
+        match pumpkin_nbt::from_bytes::<NbtCompound>(std::io::Cursor::new(chunk_data)) {
+            Ok(root) => {
+                let mut keys = root.child_tags.keys().cloned().collect::<Vec<_>>();
+                keys.sort();
+                tracing::trace!(
+                    "Chunk root keys at {:?}: {:?}",
+                    position,
+                    keys
+                );
+
+                if let Some(sections) = root.get_list("sections") {
+                    tracing::trace!(
+                        "Chunk {:?} has {} sections",
+                        position,
+                        sections.len()
+                    );
+                }
+
+                if let Some(sections) = root.get_list("sections")
+                    && let Some(first) = sections.first() {
+                        tracing::info!("First section: {:?}", first);
+                    }
+                
+                if let Some(sections) = root.get_list("sections")
+                    && let Some(first) = sections.first()
+                    && let pumpkin_nbt::tag::NbtTag::Compound(section) = first {
+                        if let Some(block_states) = section.get_compound("block_states") {
+                            tracing::error!(
+                                "block_states raw = {:?}",
+                                block_states
+                            );
+                        }
+
+                        if let Some(biomes) = section.get_compound("biomes") {
+                            tracing::error!(
+                                "biomes raw = {:?}",
+                                biomes
+                            );
+                        }
+                    }
+
+                if let Some(level) = root.get_compound("Level") {
+                    let mut level_keys = level.child_tags.keys().cloned().collect::<Vec<_>>();
+                    level_keys.sort();
+                    tracing::trace!(
+                        "Chunk Level keys at {:?}: {:?}",
+                        position,
+                        level_keys
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to parse raw NBT root at {:?}: {}",
+                    position,
+                    e
+                );
+            }
+        }
+
+        let chunk_data = match pumpkin_nbt::from_bytes::<ChunkNbt>(
+            std::io::Cursor::new(chunk_data)
+        ) {
+            Ok(chunk) => chunk,
+
+            Err(e) => {
+                tracing::error!(
+                    "Named-root parse failed for {:?}: {:?}",
+                    position,
+                    e
+                );
+
+                pumpkin_nbt::from_bytes_unnamed::<ChunkNbt>(
+                    std::io::Cursor::new(chunk_data)
+                )
+                .map_err(|e2| {
+                    tracing::error!(
+                        "Unnamed parse also failed for {:?}: {:?}",
+                        position,
+                        e2
+                    );
+
+                    ChunkParsingError::ErrorDeserializingChunk(
+                        format!(
+                            "Named root error: {:?}; unnamed error: {:?}",
+                            e,
+                            e2
+                        )
+                    )
+                })?
+            }
+        };
 
         if chunk_data.x_pos != position.x || chunk_data.z_pos != position.y {
             return Err(ChunkParsingError::ErrorDeserializingChunk(format!(
@@ -119,6 +215,11 @@ impl ChunkData {
                 .map_or(LightContainer::Empty(0), LightContainer::Full);
 
             // Convert NBT to Palettes
+            // If a section lacks block_states/biomes, it defaults to empty (all air/default biome)
+            // If the palette data is corrupt or contains unsupported entries, this will
+            // log a warning and default those entries rather than failing the whole chunk
+            // This is intentional for partial-corruption robustness; full deserialization
+            // failures (e.g. unknown NBT schema) are caught above
             block_palettes[index] = section
                 .block_states
                 .map(BlockPalette::from_disk_nbt)
@@ -274,8 +375,9 @@ impl ChunkEntityData {
         chunk_data: &[u8],
         position: Vector2<i32>,
     ) -> Result<Self, ChunkParsingError> {
-        let chunk_entity_data =
-            pumpkin_nbt::from_bytes_unnamed::<EntityNbt>(std::io::Cursor::new(chunk_data))
+        let chunk_entity_data = 
+            pumpkin_nbt::from_bytes::<EntityNbt>(std::io::Cursor::new(chunk_data))
+                .or_else(|_| pumpkin_nbt::from_bytes_unnamed::<EntityNbt>(std::io::Cursor::new(chunk_data)))
                 .map_err(|e| ChunkParsingError::ErrorDeserializingChunk(e.to_string()))?;
 
         if chunk_entity_data.position[0] != position.x

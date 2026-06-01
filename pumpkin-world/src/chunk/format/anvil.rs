@@ -546,6 +546,7 @@ impl<S: SingleChunkDataSerializer> ChunkSerializer for AnvilChunkFile<S> {
     }
 
     fn read(r: Bytes) -> Result<Self, ChunkReadingError> {
+        trace!("AnvilChunkFile::read called with {} bytes", r.len());
         let mut raw_file_bytes = r;
 
         if raw_file_bytes.len() < SECTOR_BYTES * 2 {
@@ -603,6 +604,11 @@ impl<S: SingleChunkDataSerializer> ChunkSerializer for AnvilChunkFile<S> {
         }
 
         chunk_file.end_sector = last_offset as u32;
+        trace!(
+            "AnvilChunkFile::read finished: {} chunks present out of {}",
+            chunk_file.chunks_data.iter().filter(|c| c.is_some()).count(),
+            CHUNK_COUNT
+        );
         Ok(chunk_file)
     }
 
@@ -787,6 +793,12 @@ impl<S: SingleChunkDataSerializer> ChunkSerializer for AnvilChunkFile<S> {
         chunks: Vec<Vector2<i32>>,
         stream: tokio::sync::mpsc::Sender<LoadedData<Self::Data, ChunkReadingError>>,
     ) {
+        let loaded = self.chunks_data.iter().filter(|c| c.is_some()).count();
+        trace!(
+            "AnvilChunkFile::get_chunks: {} requested, {} loaded in file",
+            chunks.len(),
+            loaded
+        );
         // Don't par iter here so we can prevent backpressure with the await in the async
         // runtime
         for chunk in chunks {

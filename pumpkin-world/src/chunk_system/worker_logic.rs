@@ -145,6 +145,11 @@ pub async fn io_read_work(
                     }
                 }
                 LoadedData::Missing(pos) => {
+                    tracing::error!(
+                        "CHUNK MISSING at {:?} — will REGENERATE. \
+                        If region file exists on disk, a parse error was swallowed upstream!",
+                        pos
+                    );
                     if send
                         .send((
                             pos,
