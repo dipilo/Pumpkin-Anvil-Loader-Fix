@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     path::PathBuf,
     pin::Pin,
     sync::{
@@ -8,7 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use pumpkin_data::{Block, chunk::ChunkStatus, fluid::Fluid};
+use pumpkin_data::{Block, chunk::{ChunkStatus, Biome}, fluid::Fluid};
 use pumpkin_nbt::{compound::NbtCompound, nbt_long_array};
 use rustc_hash::FxHashMap;
 use tokio::sync::Mutex;
@@ -21,6 +22,7 @@ use crate::{
         format::anvil::{SingleChunkDataSerializer, WORLD_DATA_VERSION},
         io::{Dirtiable, file_manager::PathFromLevelFolder},
     },
+    block::BlockStateCodec,
     generation::section_coords,
     level::LevelFolder,
     tick::{ScheduledTick, scheduler::ChunkTickScheduler},
@@ -76,110 +78,13 @@ impl Dirtiable for ChunkData {
 }
 
 impl ChunkData {
-    pub fn internal_from_bytes(
-        chunk_data: &[u8],
+    /// Build ChunkData from an already-deserialized ChunkNbt
+    /// Extracted so the Anvil named-palette path can construct a ChunkNbt
+    /// programmatically and reuse all existing chunk-assembly logic
+    pub(crate) fn from_chunk_nbt(
+        chunk_data: ChunkNbt,
         position: Vector2<i32>,
     ) -> Result<Self, ChunkParsingError> {
-        tracing::trace!(
-            "Chunk decode start at {:?}, {} bytes",
-            position,
-            chunk_data.len()
-        );
-
-        // First, inspect the raw root compound shape.
-        match pumpkin_nbt::from_bytes::<NbtCompound>(std::io::Cursor::new(chunk_data)) {
-            Ok(root) => {
-                let mut keys = root.child_tags.keys().cloned().collect::<Vec<_>>();
-                keys.sort();
-                tracing::trace!(
-                    "Chunk root keys at {:?}: {:?}",
-                    position,
-                    keys
-                );
-
-                if let Some(sections) = root.get_list("sections") {
-                    tracing::trace!(
-                        "Chunk {:?} has {} sections",
-                        position,
-                        sections.len()
-                    );
-                }
-
-                if let Some(sections) = root.get_list("sections")
-                    && let Some(first) = sections.first() {
-                        tracing::info!("First section: {:?}", first);
-                    }
-                
-                if let Some(sections) = root.get_list("sections")
-                    && let Some(first) = sections.first()
-                    && let pumpkin_nbt::tag::NbtTag::Compound(section) = first {
-                        if let Some(block_states) = section.get_compound("block_states") {
-                            tracing::error!(
-                                "block_states raw = {:?}",
-                                block_states
-                            );
-                        }
-
-                        if let Some(biomes) = section.get_compound("biomes") {
-                            tracing::error!(
-                                "biomes raw = {:?}",
-                                biomes
-                            );
-                        }
-                    }
-
-                if let Some(level) = root.get_compound("Level") {
-                    let mut level_keys = level.child_tags.keys().cloned().collect::<Vec<_>>();
-                    level_keys.sort();
-                    tracing::trace!(
-                        "Chunk Level keys at {:?}: {:?}",
-                        position,
-                        level_keys
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!(
-                    "Failed to parse raw NBT root at {:?}: {}",
-                    position,
-                    e
-                );
-            }
-        }
-
-        let chunk_data = match pumpkin_nbt::from_bytes::<ChunkNbt>(
-            std::io::Cursor::new(chunk_data)
-        ) {
-            Ok(chunk) => chunk,
-
-            Err(e) => {
-                tracing::error!(
-                    "Named-root parse failed for {:?}: {:?}",
-                    position,
-                    e
-                );
-
-                pumpkin_nbt::from_bytes_unnamed::<ChunkNbt>(
-                    std::io::Cursor::new(chunk_data)
-                )
-                .map_err(|e2| {
-                    tracing::error!(
-                        "Unnamed parse also failed for {:?}: {:?}",
-                        position,
-                        e2
-                    );
-
-                    ChunkParsingError::ErrorDeserializingChunk(
-                        format!(
-                            "Named root error: {:?}; unnamed error: {:?}",
-                            e,
-                            e2
-                        )
-                    )
-                })?
-            }
-        };
-
         if chunk_data.x_pos != position.x || chunk_data.z_pos != position.y {
             return Err(ChunkParsingError::ErrorDeserializingChunk(format!(
                 "Expected data for chunk {},{} but got it for {},{}!",
@@ -274,6 +179,29 @@ impl ChunkData {
             status: chunk_data.status.unwrap_or(ChunkStatus::Full),
             blending_data: None,
         })
+    }
+
+    pub fn internal_from_bytes(
+        chunk_data: &[u8],
+        position: Vector2<i32>,
+    ) -> Result<Self, ChunkParsingError> {
+        // 1. Try vanilla Anvil / datapack-world format first
+        //    This is a named-root NBT compound
+        if let Ok(anvil_root) = pumpkin_nbt::from_bytes::<anvil::AnvilChunkRoot>(
+            std::io::Cursor::new(chunk_data),
+        ) {
+            let chunk_nbt = convert_anvil_root_to_chunk_nbt(anvil_root)?;
+            return Self::from_chunk_nbt(chunk_nbt, position);
+        }
+
+        // 2. Fallback to Pumpkin's native/internal format
+        //    This is the only place where unnamed-root parsing makes sense
+        let chunk_nbt = pumpkin_nbt::from_bytes_unnamed::<ChunkNbt>(
+            std::io::Cursor::new(chunk_data),
+        )
+        .map_err(|e| ChunkParsingError::ErrorDeserializingChunk(e.to_string()))?;
+
+        Self::from_chunk_nbt(chunk_nbt, position)
     }
 
     async fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
@@ -443,6 +371,94 @@ impl ChunkEntityData {
     }
 }
 
+/// Convert an AnvilChunkRoot (named block/biome palettes) into the internal
+/// ChunkNbt format (numeric palettes).  Unknown blocks default to air
+/// unknown biomes default to plains (id 0)
+fn convert_anvil_root_to_chunk_nbt(
+    anvil: anvil::AnvilChunkRoot,
+) -> Result<ChunkNbt, ChunkParsingError> {
+    let sections = anvil
+        .sections
+        .into_iter()
+        .map(|sec| {
+            let block_states = sec.block_states.map(|bs| {
+                let palette: Box<[u16]> = bs
+                    .palette
+                    .into_iter()
+                    .map(|entry| resolve_anvil_block_entry(&entry.name, entry.properties))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                ChunkSectionBlockStates {
+                    data: bs.data,
+                    palette,
+                }
+            });
+
+            let biomes = sec.biomes.map(|bio| {
+                let palette: Box<[u8]> = bio
+                    .palette
+                    .into_iter()
+                    .map(|name| resolve_anvil_biome_entry(&name))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                ChunkSectionBiomes {
+                    data: bio.data,
+                    palette,
+                }
+            });
+
+            ChunkSectionNBT {
+                block_states,
+                biomes,
+                block_light: sec.block_light,
+                sky_light: sec.sky_light,
+                y: sec.y,
+            }
+        })
+        .collect();
+
+    Ok(ChunkNbt {
+        data_version: anvil.data_version,
+        x_pos: anvil.x_pos,
+        z_pos: anvil.z_pos,
+        min_y_section: anvil.min_y_section,
+        status: anvil.status,
+        sections,
+        heightmaps: anvil.heightmaps,
+        block_ticks: anvil.block_ticks,
+        fluid_ticks: anvil.fluid_ticks,
+        block_entities: anvil.block_entities,
+        light_correct: anvil.light_correct,
+    })
+}
+
+fn resolve_anvil_block_entry(name: &str, properties: Option<HashMap<String, String>>) -> u16 {
+    let Some(block) = Block::from_name(name).or_else(|| {
+        // Some vanilla chunks write names without the minecraft: prefix
+        Block::from_name(&format!("minecraft:{name}"))
+    }) else {
+        return Block::AIR.default_state.id;
+    };
+
+    match properties {
+        Some(props) => {
+            let codec = BlockStateCodec {
+                name: block,
+                properties: Some(props),
+            };
+            codec.get_state_id()
+        }
+        None => block.default_state.id,
+    }
+}
+
+fn resolve_anvil_biome_entry(name: &str) -> u8 {
+    let stripped = name.strip_prefix("minecraft:").unwrap_or(name);
+    Biome::from_name(stripped)
+        .map(|b| b.id)
+        .unwrap_or(0) // plains
+}
+
 #[derive(Serialize, Deserialize)]
 struct ChunkSectionNBT {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -574,7 +590,7 @@ impl Default for LightContainer {
 
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-struct ChunkNbt {
+pub(crate) struct ChunkNbt {
     data_version: i32,
     #[serde(rename = "xPos")]
     x_pos: i32,

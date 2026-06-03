@@ -5,6 +5,7 @@ use lz4_java_wrc::Context;
 use pumpkin_config::chunk::AnvilChunkConfig;
 use pumpkin_util::math::vector2::Vector2;
 use std::{
+    collections::HashMap,
     io::{Read, SeekFrom, Write},
     marker::PhantomData,
     path::{Path, PathBuf},
@@ -17,11 +18,17 @@ use tokio::{
 };
 use tracing::{debug, trace};
 
-use crate::chunk::{
+use crate::{
+    chunk::{
     ChunkParsingError, ChunkReadingError, ChunkSerializingError, ChunkWritingError,
-    CompressionError,
-    io::{ChunkSerializer, Dirtiable, LoadedData},
+    CompressionError, ChunkHeightmaps,
+    io::{ChunkSerializer, Dirtiable, LoadedData},},
+    tick::ScheduledTick
 };
+
+use serde::{Deserialize, Serialize};
+use pumpkin_data::{Block, chunk::ChunkStatus, fluid::Fluid};
+use pumpkin_nbt::compound::NbtCompound;
 
 /// The side size of a region in chunks (one region is 32x32 chunks)
 pub const REGION_SIZE: usize = 32;
@@ -67,6 +74,80 @@ impl<R: Read> Read for CompressionRead<R> {
             Self::LZ4(lz4) => lz4.read(buf),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Raw Anvil on-disk NBT types
+//
+// Vanilla Anvil stores block palettes as List<Compound({Name, Properties})>
+// and biome palettes as List<String>  
+// These types mirror that layout
+// They are converted to ChunkNbt (numeric palettes) at load time so the
+// internal palette system and .pump format remain untouched
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct AnvilBlockPaletteEntry {
+    #[serde(rename = "Name")]
+    pub name: String,
+
+    #[serde(default, rename = "Properties")]
+    pub properties: Option<HashMap<String, String>>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct AnvilBlockStates {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Box<[i64]>>,
+    pub palette: Vec<AnvilBlockPaletteEntry>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct AnvilBiomes {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Box<[i64]>>,
+    pub palette: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub(crate) struct AnvilChunkSection {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_states: Option<AnvilBlockStates>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub biomes: Option<AnvilBiomes>,
+    #[serde(rename = "BlockLight", skip_serializing_if = "Option::is_none")]
+    pub block_light: Option<Box<[u8]>>,
+    #[serde(rename = "SkyLight", skip_serializing_if = "Option::is_none")]
+    pub sky_light: Option<Box<[u8]>>,
+    #[serde(rename = "Y")]
+    pub y: i8,
+}
+
+/// Mirrors ChunkNbt exactly, except `sections` uses AnvilChunkSection
+/// so palettes are read as named compounds/strings instead of numeric IDs
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub(crate) struct AnvilChunkRoot {
+    pub data_version: i32,
+    #[serde(rename = "xPos")]
+    pub x_pos: i32,
+    #[serde(rename = "zPos")]
+    pub z_pos: i32,
+    #[serde(rename = "yPos")]
+    pub min_y_section: i32,
+    #[serde(default)]
+    pub status: Option<ChunkStatus>,
+    #[serde(rename = "sections")]
+    pub sections: Vec<AnvilChunkSection>,
+    pub heightmaps: ChunkHeightmaps,
+    #[serde(rename = "block_ticks")]
+    pub block_ticks: Vec<ScheduledTick<&'static Block>>,
+    #[serde(rename = "fluid_ticks")]
+    pub fluid_ticks: Vec<ScheduledTick<&'static Fluid>>,
+    #[serde(rename = "block_entities")]
+    pub block_entities: Vec<NbtCompound>,
+    #[serde(rename = "isLightOn", default)]
+    pub light_correct: bool,
 }
 
 pub struct AnvilChunkData {
