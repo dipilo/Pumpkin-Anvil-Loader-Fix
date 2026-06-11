@@ -145,10 +145,14 @@ pub async fn io_read_work(
                     }
                 }
                 LoadedData::Missing(pos) => {
-                    tracing::error!(
-                        "CHUNK MISSING at {:?} — will REGENERATE. \
-                        If region file exists on disk, a parse error was swallowed upstream!",
-                        pos
+                    // A missing chunk is normal when:
+                    // - The world is newly generated and chunks haven't been saved yet
+                    // - A player explores beyond generated terrain
+                    // - The region file simply doesn't contain this chunk
+                    // Only log at debug level since this is expected behavior
+                    debug!(
+                        "Chunk at {pos:?} not found on disk — will generate new. \
+                        This is normal for unexplored areas or new worlds."
                     );
                     if send
                         .send((

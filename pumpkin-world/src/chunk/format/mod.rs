@@ -21,6 +21,7 @@ use crate::{
         ChunkEntityData, ChunkReadingError, ChunkSerializingError,
         format::anvil::{SingleChunkDataSerializer, WORLD_DATA_VERSION},
         io::{Dirtiable, file_manager::PathFromLevelFolder},
+        dynamic_biome::DYNAMIC_BIOMES,
     },
     block::BlockStateCodec,
     generation::section_coords,
@@ -453,10 +454,31 @@ fn resolve_anvil_block_entry(name: &str, properties: Option<HashMap<String, Stri
 }
 
 fn resolve_anvil_biome_entry(name: &str) -> u8 {
+    // 1. Try vanilla biome lookup (existing behavior)
     let stripped = name.strip_prefix("minecraft:").unwrap_or(name);
-    Biome::from_name(stripped)
-        .map(|b| b.id)
-        .unwrap_or(0) // plains
+    if let Some(biome) = Biome::from_name(stripped) {
+        return biome.id;
+    }
+
+    // 2. Try the dynamic/modded biome registry
+    {
+        let registry = DYNAMIC_BIOMES.read().unwrap();
+        if let Some(id) = registry.lookup(name) {
+            return id;
+        }
+    }
+
+    // 3. Register this unknown biome dynamically
+    {
+        let mut registry = DYNAMIC_BIOMES.write().unwrap();
+        if let Some(id) = registry.register(name) {
+            return id;
+        }
+    }
+
+    // 4. Registry full — log and fall back to plains
+    tracing::warn!("Unknown biome '{name}' and dynamic registry full, falling back to plains");
+    Biome::PLAINS.id
 }
 
 #[derive(Serialize, Deserialize)]

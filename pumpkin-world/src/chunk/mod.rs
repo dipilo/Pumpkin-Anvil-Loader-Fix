@@ -20,6 +20,7 @@ use tokio::sync::Mutex;
 pub mod format;
 pub mod io;
 pub mod palette;
+pub mod dynamic_biome;
 
 // TODO
 pub const CHUNK_WIDTH: usize = BlockPalette::SIZE;

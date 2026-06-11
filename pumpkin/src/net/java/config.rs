@@ -23,7 +23,8 @@ use pumpkin_protocol::{
         },
     },
 };
-use pumpkin_util::{Hand, text::TextComponent, version::JavaMinecraftVersion};
+use pumpkin_util::{Hand, resource_location::ResourceLocation, text::TextComponent, version::JavaMinecraftVersion};
+use pumpkin_world::chunk::dynamic_biome::DYNAMIC_BIOMES;
 use tracing::{debug, trace, warn};
 
 const BRAND_CHANNEL_PREFIX: &str = "minecraft:brand";
@@ -163,12 +164,40 @@ impl JavaClient {
         // let mut tags_to_send = Vec::new();
         let version = self.version.load();
         let registry = Registry::get_synced(version);
+
+        // Get dynamic biome entries that were discovered during world pre-scan
+        let dynamic_biome_entries = {
+            let registry = DYNAMIC_BIOMES.read().unwrap();
+            registry.has_entries().then(|| registry.get_registry_entries())
+        };
+
+        let biome_registry_id = ResourceLocation::from("worldgen/biome");
+
         for registry in registry {
-            let entries: Vec<RegistryEntry> = registry
+            let mut entries: Vec<RegistryEntry> = registry
                 .registry_entries
                 .iter()
                 .map(|r| RegistryEntry::new(r.entry_id.clone(), r.data.clone()))
                 .collect();
+
+            // If this is the biome registry, append any dynamically-discovered modded biomes
+            // These are biomes encountered while loading Anvil chunks that are not
+            // in Pumpkin's compile-time vanilla biome list (e.g. Terralith, CliffTree)
+            // We MUST append them to the same registry packet so the client knows about
+            // them before it receives chunk data referencing these biome IDs
+            if registry.registry_id == biome_registry_id 
+                && let Some(ref dynamic_entries) = dynamic_biome_entries {
+                    debug!(
+                        "Appending {} dynamic biome entries to worldgen/biome registry",
+                        dynamic_entries.len()
+                    );
+                    for (loc, data) in dynamic_entries {
+                        // data is always present and valid - we never send None for biomes
+                        entries.push(RegistryEntry::new(loc.clone(), Some(data.clone())));
+                    }
+                }
+            
+
             self.send_packet_now(&CRegistryData::new(&registry.registry_id, &entries))
                 .await;
             // if let Some(tag) = RegistryKey::from_string(&registry.registry_id.path)

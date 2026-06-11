@@ -11,6 +11,7 @@ use crate::{
         format::anvil::AnvilChunkFile,
         io::{Dirtiable, FileIO, LoadedData, file_manager::ChunkFileManager},
         palette::has_random_ticking_fluid,
+        dynamic_biome::{clear_dynamic_biomes, discover_modded_biomes_from_region_files, DYNAMIC_BIOMES},
     },
     generation::get_world_gen,
     tick::{OrderedTick, ScheduledTick, TickPriority},
@@ -132,7 +133,34 @@ impl Level {
         dimension: Dimension,
         gen_pool: Option<Arc<rayon::ThreadPool>>,
     ) -> Arc<Self> {
-        let region_folder = root_folder.join("region");
+        // Detect 26.1+ dimension-based world layout vs legacy flat layout
+        // In 26.1+, region files moved from world/region/ to
+        // world/dimensions/minecraft/overworld/region/
+        let region_folder =
+            if root_folder.join("dimensions/minecraft/overworld/region").is_dir() {
+                tracing::info!("Detected 26.1+ dimension layout for overworld");
+                root_folder.join("dimensions/minecraft/overworld/region")
+            } else {
+                let legacy = root_folder.join("region");
+                if legacy.is_dir() {
+                    // Check if there are actually .mca files here
+                    let has_mca = std::fs::read_dir(&legacy)
+                        .map(|mut entries| {
+                            entries.any(|e| {
+                                e.map(|entry| {
+                                    entry.file_name().to_string_lossy().ends_with(".mca")
+                                })
+                                .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+                    if has_mca {
+                        tracing::info!("Detected legacy pre-26.1 world layout");
+                    }
+                }
+                legacy
+            };
+
         let entities_folder = root_folder.join("entities");
 
         std::fs::create_dir_all(&region_folder).expect("Failed to create Region folder");
@@ -159,6 +187,21 @@ impl Level {
         } else {
             level_config.chunk.clone()
         };
+
+        // Reset dynamic biome registry when loading a new world,
+        // then pre-scan region files to discover modded biomes.
+        // This must happen BEFORE any client connects so the registry sync
+        // includes all biomes the client will encounter.
+        clear_dynamic_biomes();
+        let discovered = discover_modded_biomes_from_region_files(&region_folder);
+        if !discovered.is_empty() {
+            let mut registry = DYNAMIC_BIOMES.write().unwrap();
+            registry.preload_biomes(&discovered);
+            info!(
+                "Pre-registered {} dynamic biome(s) from world scan",
+                registry.len()
+            );
+        }
 
         let level_folder = Arc::new(LevelFolder {
             root_folder,
