@@ -42,6 +42,11 @@ pub mod screen;
 #[path = "generated/particle.rs"]
 pub mod particle;
 
+#[cfg(feature = "statistic")]
+#[rustfmt::skip]
+#[path = "generated/statistic.rs"]
+pub mod statistic;
+
 #[cfg(feature = "sound")]
 #[rustfmt::skip]
 #[path = "generated/sound_category.rs"]
@@ -57,6 +62,17 @@ pub mod sound {
     pub use crate::sound_category::*;
     pub use crate::sound_enum::*;
 }
+
+#[cfg(feature = "advancement")]
+#[rustfmt::skip]
+#[path = "generated/advancement.rs"]
+pub mod advancement;
+
+#[cfg(feature = "advancement")]
+pub mod advancement_data;
+
+#[cfg(feature = "advancement")]
+pub use advancement::*;
 
 #[cfg(feature = "recipes")]
 #[rustfmt::skip]
@@ -233,6 +249,11 @@ pub mod entity_id_remap;
 #[rustfmt::skip]
 #[path = "generated/sound_id_remap.rs"]
 pub mod sound_id_remap;
+
+#[cfg(feature = "bedrock_creative")]
+#[rustfmt::skip]
+#[path = "generated/bedrock_creative.rs"]
+pub mod bedrock_creative;
 
 #[cfg(feature = "tag")]
 #[rustfmt::skip]

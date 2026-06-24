@@ -55,6 +55,8 @@ pub struct ArrowEntity {
     pub pickup: ArrowPickup,
     pub is_critical: AtomicBool,
     pub pierce_level: AtomicU8,
+    pub punch_level: AtomicU8,
+    pub is_flame: AtomicBool,
     pub in_ground: AtomicBool,
     pub in_ground_time: AtomicU32,
     pub life: AtomicU32,
@@ -78,6 +80,8 @@ impl ArrowEntity {
             pickup: ArrowPickup::Disallowed,
             is_critical: AtomicBool::new(false),
             pierce_level: AtomicU8::new(0),
+            punch_level: AtomicU8::new(0),
+            is_flame: AtomicBool::new(false),
             in_ground: AtomicBool::new(false),
             in_ground_time: AtomicU32::new(0),
             life: AtomicU32::new(0),
@@ -100,6 +104,8 @@ impl ArrowEntity {
             pickup,
             is_critical: AtomicBool::new(false),
             pierce_level: AtomicU8::new(0),
+            punch_level: AtomicU8::new(0),
+            is_flame: AtomicBool::new(false),
             in_ground: AtomicBool::new(false),
             in_ground_time: AtomicU32::new(0),
             life: AtomicU32::new(0),
@@ -390,12 +396,26 @@ impl EntityBase for ArrowEntity {
                         let bonus = (rand::random::<u32>() % (damage / 2 + 2) as u32) as i32;
                         damage = damage.saturating_add(bonus);
                     }
+                    if self.is_flame.load(Ordering::Relaxed) {
+                        target.get_entity().set_on_fire_for_ticks(100);
+                    }
+
                     target
                         .damage(&*target, damage as f32, DamageType::ARROW)
                         .await;
 
                     if target.get_living_entity().is_some() {
-                        // TODO: knockback
+                        let punch = self.punch_level.load(Ordering::Relaxed);
+                        if punch > 0
+                            && let Some(owner_id) = self.owner_id
+                            && let Some(owner_entity) = world.get_entity_by_id(owner_id)
+                        {
+                            crate::entity::combat::handle_knockback(
+                                owner_entity.get_entity(),
+                                target.get_entity(),
+                                f64::from(punch) * 0.6,
+                            );
+                        }
 
                         // Play hit sound
                         let sound_packet = CSoundEffect::new(
