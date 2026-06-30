@@ -2074,12 +2074,12 @@ impl JavaClient {
         }
     }
 
-    pub fn update_sequence(&self, player: &Player, sequence: i32) {
+    pub fn update_sequence(&self, _player: &Player, sequence: i32) {
         if sequence < 0 {
             error!("Expected packet sequence >= 0");
         }
-        player.packet_sequence.store(
-            player.packet_sequence.load(Ordering::Relaxed).max(sequence),
+        self.packet_sequence.store(
+            self.packet_sequence.load(Ordering::Relaxed).max(sequence),
             Ordering::Relaxed,
         );
     }
@@ -2159,8 +2159,10 @@ impl JavaClient {
             return Err(BlockPlacingError::InvalidHand);
         };
 
-        //TODO this.player.resetLastActionTime();
-        //TODO this.gameModeForPlayer == GameType.SPECTATOR
+        if player.gamemode.load() == GameMode::Spectator {
+            // TODO: openMenu
+            return Ok(());
+        }
 
         let inventory = player.inventory();
         let held_item = inventory.held_item();
@@ -2493,6 +2495,17 @@ impl JavaClient {
             }
         }
         if let Some(equippable) = held.get_data_component::<EquippableImpl>() {
+            // Skip if the item is already in the target equipment slot.
+            // This prevents a self-deadlock: `held` already locks the same
+            // Mutex<ItemStack> that `get_or_insert` would return, and
+            // Tokio's Mutex is not reentrant.
+            if inventory
+                .is_already_equipped(item_in_hand, equippable.slot)
+                .await
+            {
+                return;
+            }
+
             // If it can be equipped we want to make sure we can actually equip it
             player
                 .enqueue_equipment_change(equippable.slot, &held)

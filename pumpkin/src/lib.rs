@@ -391,6 +391,15 @@ impl PumpkinServer {
             error!("Error saving all players during shutdown: {e}");
         }
 
+        if let Err(e) = self
+            .server
+            .advancement_manager
+            .save_all_players(&self.server.get_all_players())
+            .await
+        {
+            error!("Error saving all players advancements during shutdown: {e}");
+        }
+
         let kick_message = TextComponent::text("Server stopped");
         for player in self.server.get_all_players() {
             player
@@ -459,13 +468,13 @@ impl PumpkinServer {
                                 },
                                 PacketHandlerResult::ReadyToPlay(profile,config) => {
                                      if let Some((player, world)) = server_clone
-                                     .add_player(ClientPlatform::Java(java_client), profile, Some(config))
+                                     .add_player(Arc::new(ClientPlatform::Java(java_client)), profile, Some(config))
                                           .await
                                 {
                                     world
                                         .spawn_java_player(&server_clone.basic_config, &player, &server_clone)
                                         .await;
-                                    if let ClientPlatform::Java(client) = &player.client {
+                                    if let ClientPlatform::Java(client) = player.client.as_ref() {
                                         *client.player.lock().await = Some(player.clone());
                                         client.progress_player_packets(&player, &server_clone).await;
 
@@ -479,6 +488,11 @@ impl PumpkinServer {
                                         .handle_player_leave(&player)
                                         .await {
                                             error!("Failed to save player data on disconnect: {e}");
+                                        }
+                                    if let Err(e) = server_clone.advancement_manager
+                                        .save_player(&player)
+                                        .await {
+                                            error!("Failed to save player advancement on disconnect: {e}");
                                         }
                                     }
                                 },
@@ -497,6 +511,11 @@ impl PumpkinServer {
                 match udp_result {
                     Ok((len, client_addr)) => {
                         if len > 0 {
+                            let Some(socket) = self.udp_socket.clone() else {
+                                error!("UDP socket disappeared during receive");
+                                return true;
+                            };
+
                             let id = udp_buf[0];
                             let is_online = id & 128 != 0;
 
@@ -517,7 +536,7 @@ impl PumpkinServer {
                                     *master_client_id_counter += 1;
 
                                     let new_client = Arc::new(BedrockClient::new(
-                                        self.udp_socket.as_ref().unwrap().clone(),
+                                        socket,
                                         client_addr,
                                         be_clients
                                     ));
@@ -539,7 +558,7 @@ impl PumpkinServer {
                                             }
                                             PacketHandlerResult::ReadyToPlay(profile, config) => {
                                                 if let Some((player, _world)) = server_clone
-                                                    .add_player(ClientPlatform::Bedrock(client_clone.clone()), profile, Some(config))
+                                                    .add_player(Arc::new(ClientPlatform::Bedrock(client_clone.clone())), profile, Some(config))
                                                     .await
                                                 {
                                                     *client_clone.player.lock().await = Some(player.clone());
