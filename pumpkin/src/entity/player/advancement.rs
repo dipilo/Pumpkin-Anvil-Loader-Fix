@@ -11,18 +11,50 @@ use pumpkin_data::{ADVANCEMENT_TREE, Advancement, translation};
 use pumpkin_protocol::java::client::play::{CSelectAdvancementsTab, CUpdateAdvancements};
 use pumpkin_util::identifier::Identifier;
 use pumpkin_util::text::TextComponent;
+use pumpkin_world::world_info::MAXIMUM_SUPPORTED_WORLD_DATA_VERSION;
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::to_string_pretty;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{create_dir_all, read, write};
 use std::path::PathBuf;
 use std::str::from_utf8;
 use std::sync::{Arc, Weak};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use time::macros::format_description;
+use time::{OffsetDateTime, UtcOffset};
 use tokio::task::spawn_blocking;
 use tracing::{error, warn};
 use uuid::Uuid;
+
+/// Vanilla advancement obtain-date format, e.g. `2026-06-24 12:27:57 -0400`
+/// (`SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z")` in Minecraft)
+const ADVANCEMENT_DATE_FORMAT: &[time::format_description::FormatItem<'static>] = format_description!(
+    "[year]-[month]-[day] [hour]:[minute]:[second] [offset_hour sign:mandatory][offset_minute]"
+);
+
+/// Format a [`SystemTime`] as a vanilla advancement obtain-date string, using the
+/// local UTC offset when available (falling back to UTC otherwise)
+fn system_time_to_vanilla_date(time: SystemTime) -> String {
+    let secs = time
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let datetime = OffsetDateTime::from_unix_timestamp(secs).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    // `current_local_offset` fails in multi-threaded contexts on some platforms;
+    // UTC (`+0000`) is still a valid, round-trippable value if so
+    let datetime = UtcOffset::current_local_offset().map_or(datetime, |off| datetime.to_offset(off));
+    datetime
+        .format(ADVANCEMENT_DATE_FORMAT)
+        .unwrap_or_else(|_| "1970-01-01 00:00:00 +0000".to_string())
+}
+
+/// Parse a vanilla advancement obtain-date string back into a [`SystemTime`]
+fn vanilla_date_to_system_time(value: &str) -> Option<SystemTime> {
+    let datetime = OffsetDateTime::parse(value, ADVANCEMENT_DATE_FORMAT).ok()?;
+    u64::try_from(datetime.unix_timestamp())
+        .ok()
+        .map(|secs| UNIX_EPOCH + Duration::from_secs(secs))
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default)]
 pub struct CriterionProgress(pub Option<SystemTime>);
@@ -132,13 +164,33 @@ impl Serialize for AdvancementProgress {
     where
         S: Serializer,
     {
-        let map: HashMap<&Arc<str>, &CriterionProgress> = self
+        // Vanilla per-advancement object: `{ "criteria": { <criterion>: <date> }, "done": <bool> }`
+        let criteria: BTreeMap<&str, String> = self
             .criteria
             .iter()
-            .filter(|(_key, criteria)| criteria.is_done())
+            .filter_map(|(key, criterion)| {
+                criterion
+                    .0
+                    .map(|time| (key.as_ref(), system_time_to_vanilla_date(time)))
+            })
             .collect();
-        map.serialize(serializer)
+
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("criteria", &criteria)?;
+        map.serialize_entry("done", &self.is_done())?;
+        map.end()
     }
+}
+
+/// On-disk shape of a single advancement entry in the vanilla format
+#[derive(Deserialize)]
+struct DiskAdvancementProgress {
+    #[serde(default)]
+    criteria: HashMap<Arc<str>, String>,
+    /// Present in vanilla files but recomputed from criteria + requirements on
+    /// load, so it is parsed only to be ignored
+    #[serde(default, rename = "done")]
+    _done: bool,
 }
 
 impl<'de> Deserialize<'de> for AdvancementProgress {
@@ -146,7 +198,17 @@ impl<'de> Deserialize<'de> for AdvancementProgress {
     where
         D: Deserializer<'de>,
     {
-        let criteria = HashMap::<Arc<str>, CriterionProgress>::deserialize(deserializer)?;
+        let disk = DiskAdvancementProgress::deserialize(deserializer)?;
+        // Every criterion listed in a vanilla file has been obtained; an
+        // unparseable date still counts as obtained, falling back to the epoch
+        let criteria = disk
+            .criteria
+            .into_iter()
+            .map(|(key, date)| {
+                let time = vanilla_date_to_system_time(&date).unwrap_or(UNIX_EPOCH);
+                (key, CriterionProgress(Some(time)))
+            })
+            .collect();
         Ok(Self {
             criteria,
             requirements: AdvancementRequirement::default(),
@@ -210,6 +272,9 @@ pub struct PlayerAdvancement {
     pub last_selected_tab: Option<&'static Advancement>,
     /// A weak reference to the player who owns these advancements.
     pub player: Weak<Player>,
+    /// `DataVersion` written into the vanilla advancement file
+    /// Preserved from the loaded file when present, so the world stays valid in real Minecraft
+    pub data_version: i32,
 }
 
 /// Errors that can occur when saving or loading advancement data.
@@ -235,6 +300,7 @@ impl PlayerAdvancement {
             visible: HashSet::default(),
             progress_changed: HashSet::default(),
             last_selected_tab: None,
+            data_version: MAXIMUM_SUPPORTED_WORLD_DATA_VERSION,
         }
     }
 
@@ -291,21 +357,38 @@ impl PlayerAdvancement {
             .await
             .expect("spawn_blocking task panicked")?;
 
-        let loaded_data: HashMap<String, AdvancementProgress> =
+        // Parse loosely so unknown top-level keys (notably vanilla's `DataVersion`)
+        // and a single malformed advancement entry don't abort the whole load
+        let loaded_data: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(from_utf8(&json).unwrap()).map_err(AdvancementDataError::Json)?;
 
         self.progress.clear();
-        for (advancement_id, mut progress) in loaded_data {
-            if let Some(advancement_ref) = Advancement::from_minecraft_name(&advancement_id) {
-                progress.update(AdvancementRequirement::from_const(
-                    advancement_ref.requirements,
-                ));
-                self.progress.insert(advancement_ref, progress);
-                self.progress_changed.insert(advancement_ref);
-                self.mark_for_visibility_update(advancement_ref);
-            } else {
-                warn!("The Advancement name {} is invalid", advancement_id);
+        for (advancement_id, value) in loaded_data {
+            if advancement_id == "DataVersion" {
+                if let Some(version) = value.as_i64() {
+                    self.data_version = version as i32;
+                }
+                continue;
             }
+
+            let Some(advancement_ref) = Advancement::from_minecraft_name(&advancement_id) else {
+                warn!("The Advancement name {} is invalid", advancement_id);
+                continue;
+            };
+
+            let mut progress: AdvancementProgress = match serde_json::from_value(value) {
+                Ok(progress) => progress,
+                Err(e) => {
+                    warn!("Failed to parse advancement progress for {advancement_id}: {e}");
+                    continue;
+                }
+            };
+            progress.update(AdvancementRequirement::from_const(
+                advancement_ref.requirements,
+            ));
+            self.progress.insert(advancement_ref, progress);
+            self.progress_changed.insert(advancement_ref);
+            self.mark_for_visibility_update(advancement_ref);
         }
         Ok(())
     }
@@ -505,11 +588,13 @@ impl Serialize for PlayerAdvancement {
             .filter(|(_key, value)| value.has_progress())
             .map(|(&key, val)| (key, val))
             .collect();
-        let mut map = serializer.serialize_map(Some(filtered_map.len()))?;
+        // +1 for the trailing `DataVersion` entry that keeps the file valid in real Minecraft
+        let mut map = serializer.serialize_map(Some(filtered_map.len() + 1))?;
 
         for (advancement, progress) in &filtered_map {
-            map.serialize_entry(&advancement.id, &progress.criteria)?;
+            map.serialize_entry(&advancement.id, progress)?;
         }
+        map.serialize_entry("DataVersion", &self.data_version)?;
         map.end()
     }
 }
@@ -608,11 +693,15 @@ mod tests {
         // File should exist
         assert!(pa.path.exists(), "Saved file should exist");
 
-        // Content should be valid JSON
+        // Content should be valid JSON in the vanilla format
         let content = std::fs::read_to_string(&pa.path).unwrap();
         assert!(!content.is_empty(), "Saved file should not be empty");
-        let _: HashMap<String, AdvancementProgress> =
+        let parsed: serde_json::Value =
             serde_json::from_str(&content).expect("Saved content should be valid JSON");
+        assert!(
+            parsed.get("DataVersion").is_some(),
+            "Saved file should carry a DataVersion for Minecraft compatibility"
+        );
     }
 
     #[tokio::test]
@@ -716,6 +805,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn load_vanilla_format_file() {
+        // A file exactly as written by real Minecraft
+        let temp_dir = tempdir().unwrap();
+        let manager = Arc::new(AdvancementManager::new(temp_dir.path(), true));
+        let id = Uuid::new_v4();
+        let mut pa = PlayerAdvancement::new(manager, id);
+
+        let vanilla = r#"{
+  "minecraft:recipes/decorations/crafting_table": {
+    "criteria": {
+      "unlock_right_away": "2026-06-24 12:27:57 -0400"
+    },
+    "done": true
+  },
+  "minecraft:adventure/adventuring_time": {
+    "criteria": {
+      "minecraft:frozen_ocean": "2026-06-24 12:27:58 -0400"
+    },
+    "done": false
+  },
+  "DataVersion": 4790
+}"#;
+        std::fs::write(&pa.path, vanilla).unwrap();
+
+        // Previously this failed with "unknown field `unlock_right_away`"
+        assert!(pa.load().await.is_ok(), "Vanilla-format load should succeed");
+        assert_eq!(pa.data_version, 4790, "DataVersion should be preserved");
+
+        let adv = Advancement::from_minecraft_name("minecraft:recipes/decorations/crafting_table")
+            .expect("advancement should exist");
+        assert!(
+            pa.progress.get_mut_or_start_progress(adv).is_done(),
+            "Completed recipe advancement should load as done"
+        );
+    }
+
+    #[tokio::test]
     async fn load_invalid_advancement_id() {
         let temp_dir = tempdir().unwrap();
         let manager = Arc::new(AdvancementManager::new(temp_dir.path(), true));
@@ -771,10 +897,11 @@ mod tests {
 
         assert!(pa.save().await.is_ok(), "Save should succeed");
 
-        // Verify both were saved
+        // Verify both were saved (ignoring the trailing `DataVersion` entry)
         let content = std::fs::read_to_string(&pa.path).unwrap();
-        let saved_data: HashMap<String, AdvancementProgress> =
+        let mut saved_data: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(&content).unwrap();
+        saved_data.remove("DataVersion");
         assert_eq!(saved_data.len(), 2, "Should have saved both advancements");
     }
 }

@@ -43,6 +43,8 @@ dashmap.workspace = true
 flate2.workspace = true
 lz4-java-wrc.workspace = true
 ruzstd.workspace = true
+# Datapack (.zip) reading for biome/worldgen definitions
+zip.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 
 itertools.workspace = true

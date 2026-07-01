@@ -12,18 +12,21 @@ use crate::{
     server::Server,
 };
 use core::str;
-use pumpkin_data::{registry::Registry, translation};
+use pumpkin_data::{
+    registry::{Registry, RegistryEntryData},
+    translation,
+};
 use pumpkin_protocol::{
     ConnectionState,
     java::{
-        client::config::{CFinishConfig, CRegistryData, CUpdateTags, RegistryEntry},
+        client::config::{CFinishConfig, CRegistryData, CUpdateTags},
         server::config::{
             ResourcePackResponseResult, SClientInformationConfig, SConfigCookieResponse,
             SConfigResourcePack, SKeepAlive, SKnownPacks, SPluginMessage,
         },
     },
 };
-use pumpkin_util::{Hand, resource_location::ResourceLocation, text::TextComponent, version::JavaMinecraftVersion};
+use pumpkin_util::{Hand, text::TextComponent, version::JavaMinecraftVersion};
 use pumpkin_world::chunk::dynamic_biome::DYNAMIC_BIOMES;
 use tracing::{debug, trace, warn};
 
@@ -171,35 +174,47 @@ impl JavaClient {
             registry.has_entries().then(|| registry.get_registry_entries())
         };
 
-        let biome_registry_id = ResourceLocation::from("worldgen/biome");
-
         for registry in registry {
-            let mut entries: Vec<RegistryEntry> = registry
-                .registry_entries
-                .iter()
-                .map(|r| RegistryEntry::new(r.entry_id.clone(), r.data.clone()))
-                .collect();
-
-            // If this is the biome registry, append any dynamically-discovered modded biomes
-            // These are biomes encountered while loading Anvil chunks that are not
-            // in Pumpkin's compile-time vanilla biome list (e.g. Terralith, CliffTree)
-            // We MUST append them to the same registry packet so the client knows about
-            // them before it receives chunk data referencing these biome IDs
-            if registry.registry_id == biome_registry_id 
-                && let Some(ref dynamic_entries) = dynamic_biome_entries {
-                    debug!(
-                        "Appending {} dynamic biome entries to worldgen/biome registry",
-                        dynamic_entries.len()
-                    );
-                    for (loc, data) in dynamic_entries {
-                        // data is always present and valid - we never send None for biomes
-                        entries.push(RegistryEntry::new(loc.clone(), Some(data.clone())));
-                    }
+            // For the biome registry, append any dynamically-discovered modded
+            // biomes (encountered while loading Anvil chunks, e.g. Terralith /
+            // CliffTree) that are not in Pumpkin's compile-time vanilla biome list
+            let is_biome_registry = registry
+                .registry_id
+                .strip_prefix("minecraft:")
+                .unwrap_or(&registry.registry_id)
+                == "worldgen/biome";
+            if is_biome_registry
+                && let Some(ref dynamic_entries) = dynamic_biome_entries
+                && !dynamic_entries.is_empty()
+            {
+                debug!(
+                    "Appending {} dynamic biome entries to worldgen/biome registry",
+                    dynamic_entries.len()
+                );
+                let mut entries: Vec<RegistryEntryData> = registry
+                    .registry_entries
+                    .iter()
+                    .map(|r| RegistryEntryData {
+                        entry_id: r.entry_id.clone(),
+                        data: r.data.clone(),
+                    })
+                    .collect();
+                for (loc, data) in dynamic_entries {
+                    // data is always present and valid - we never send None for biomes
+                    entries.push(RegistryEntryData {
+                        entry_id: loc.clone(),
+                        data: Some(data.clone()),
+                    });
                 }
-            
-
-            self.send_packet_now(&CRegistryData::new(&registry.registry_id, &entries))
+                self.send_packet_now(&CRegistryData::new(&registry.registry_id, &entries))
+                    .await;
+            } else {
+                self.send_packet_now(&CRegistryData::new(
+                    &registry.registry_id,
+                    &registry.registry_entries,
+                ))
                 .await;
+            }
             // if let Some(tag) = RegistryKey::from_string(&registry.registry_id.path)
             //     && pumpkin_data::tag::get_registry_key_tags(self.version.load(), tag).is_some()
             // {
@@ -290,5 +305,33 @@ impl JavaClient {
 
         let config = self.config.lock().await;
         PacketHandlerResult::ReadyToPlay(profile, config.clone().unwrap_or_default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pumpkin_data::registry::Registry;
+    use pumpkin_util::version::JavaMinecraftVersion;
+
+    #[test]
+    fn biome_registry_is_recognised_when_prefixed() {
+        let registries = Registry::get_synced(JavaMinecraftVersion::V_26_2);
+
+        // The biome registry id is the fully-qualified form
+        assert!(
+            registries
+                .iter()
+                .any(|r| r.registry_id == "minecraft:worldgen/biome"),
+            "expected a fully-qualified minecraft:worldgen/biome registry"
+        );
+
+        // The prefix-tolerant predicate used in handle_known_packs matches it
+        let matched = registries.iter().any(|r| {
+            r.registry_id
+                .strip_prefix("minecraft:")
+                .unwrap_or(&r.registry_id)
+                == "worldgen/biome"
+        });
+        assert!(matched, "biome registry must be recognised for dynamic append");
     }
 }

@@ -467,7 +467,7 @@ impl ProtoChunk {
     #[inline]
     #[must_use]
     pub fn get_biome(&self, x: i32, y: i32, z: i32) -> &'static Biome {
-        Biome::from_id(self.get_biome_id(x, y, z)).unwrap()
+        crate::chunk::dynamic_biome::resolve_biome(self.get_biome_id(x, y, z))
     }
 
     #[inline]
@@ -870,7 +870,9 @@ impl ProtoChunk {
 
     #[must_use]
     pub fn get_terrain_gen_biome(&self, x: i32, y: i32, z: i32) -> &'static Biome {
-        Biome::from_id(self.get_terrain_gen_biome_id(x, y, z)).unwrap()
+        // Resolve dynamic/datapack biome IDs 
+        // to the closest vanilla biome for generation instead of panicking
+        crate::chunk::dynamic_biome::resolve_biome(self.get_terrain_gen_biome_id(x, y, z))
     }
 
     pub fn build_surface(

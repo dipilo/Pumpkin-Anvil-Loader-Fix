@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 pub mod format;
 pub mod io;
 pub mod palette;
+pub mod datapack_biome;
 pub mod dynamic_biome;
 
 // TODO

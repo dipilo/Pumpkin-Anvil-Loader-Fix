@@ -14,6 +14,8 @@ pub struct LevelConfig {
     /// Number of ticks between autosave checks. If 0, autosave is disabled.
     #[serde(default = "default_autosave_ticks")]
     pub autosave_ticks: u64,
+    #[serde(default)]
+    pub datapack_paths: Vec<std::path::PathBuf>,
     // TODO: More options
 }
 

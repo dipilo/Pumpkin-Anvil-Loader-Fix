@@ -352,7 +352,7 @@ fn convert_anvil_root_to_chunk_nbt(
         .into_iter()
         .map(|sec| {
             let block_states = sec.block_states.map(|bs| {
-                let palette: Box<[u16]> = bs
+                let palette: Box<[BlockStateId]> = bs
                     .palette
                     .into_iter()
                     .map(|entry| resolve_anvil_block_entry(&entry.name, entry.properties))
@@ -402,7 +402,7 @@ fn convert_anvil_root_to_chunk_nbt(
     })
 }
 
-fn resolve_anvil_block_entry(name: &str, properties: Option<HashMap<String, String>>) -> u16 {
+fn resolve_anvil_block_entry(name: &str, properties: Option<HashMap<String, String>>) -> BlockStateId {
     let Some(block) = Block::from_name(name).or_else(|| {
         // Some vanilla chunks write names without the minecraft: prefix
         Block::from_name(&format!("minecraft:{name}"))

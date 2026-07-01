@@ -294,13 +294,14 @@ impl GenerationCache for Cache {
         };
         match &self.chunks[(dx * self.size + dy) as usize] {
             Chunk::Level(data) => {
-                // Could this happen?
-                Biome::from_id(
+                // A fully-loaded neighbor may carry dynamic/datapack biome IDs
+                // (>= 65); resolve them to the closest vanilla biome rather than
+                // panicking when they bleed into adjacent terrain generation
+                crate::chunk::dynamic_biome::resolve_biome(
                     data.section
                         .get_rough_biome_absolute_y((x & 15) as usize, y, (z & 15) as usize)
                         .unwrap_or(0),
                 )
-                .unwrap()
             }
             Chunk::Proto(data) => data.get_terrain_gen_biome(x, y, z),
         }

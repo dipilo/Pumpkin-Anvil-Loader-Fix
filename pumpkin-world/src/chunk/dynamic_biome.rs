@@ -1,40 +1,44 @@
 use std::{
     collections::HashMap,
     io::{Read, Seek, SeekFrom},
+    path::PathBuf,
     sync::{LazyLock, RwLock},
 };
 
-use pumpkin_nbt::compound::NbtCompound;
+use pumpkin_data::chunk::Biome;
 use pumpkin_util::resource_location::ResourceLocation;
+use rayon::prelude::*;
+use serde_json::{Map, Value};
 use tracing::{debug, info, warn};
 
-/// The next available dynamic biome ID. Vanilla biomes use compile-time IDs
-/// We reserve a range for dynamic biomes encountered in Anvil worlds
-const DYNAMIC_BIOME_START: u8 = 65;
+use super::datapack_biome::{self, DatapackBiomeDef};
+
 const MAX_DYNAMIC_BIOME_ID: u8 = 239;
 
+/// The first internal ID handed out to dynamic (datapack) biomes
+fn dynamic_biome_start() -> u8 {
+    // Count the contiguous run of valid vanilla IDs starting at 0
+    (0u16..=u16::from(u8::MAX))
+        .take_while(|&id| Biome::from_id(id as u8).is_some())
+        .count() as u8
+}
+
 /// Runtime registry for modded/datapack biomes not known at compile time
-///
-/// Pumpkin's biome system uses compile-time generated code with only vanilla biomes
-/// This registry allows mapping modded biome names (e.g. `terralith:alpha_islands`)
-/// to runtime IDs so that Anvil worlds with custom biomes load correctly
 pub static DYNAMIC_BIOMES: LazyLock<RwLock<DynamicBiomeRegistry>> =
     LazyLock::new(|| RwLock::new(DynamicBiomeRegistry::new()));
 
 pub struct DynamicBiomeRegistry {
-    /// Full namespaced name (e.g. "terralith:alpha_islands") -> biome ID
     name_to_id: HashMap<String, u8>,
-    /// biome ID -> entry
     id_to_entry: HashMap<u8, DynamicBiomeEntry>,
+    definitions: HashMap<String, DatapackBiomeDef>,
     next_id: u8,
 }
 
 #[derive(Clone, Debug)]
 pub struct DynamicBiomeEntry {
     pub name: String,
-    /// The network/registry NBT data sent to clients
-    /// Contains the biome definition the client uses for rendering
     pub data: Box<[u8]>,
+    pub gen_biome: &'static Biome,
 }
 
 impl DynamicBiomeRegistry {
@@ -42,18 +46,29 @@ impl DynamicBiomeRegistry {
         Self {
             name_to_id: HashMap::new(),
             id_to_entry: HashMap::new(),
-            next_id: DYNAMIC_BIOME_START,
+            definitions: HashMap::new(),
+            next_id: dynamic_biome_start(),
         }
     }
 
-    /// Look up a biome by its full namespaced name (e.g. "terralith:alpha_islands")
-    /// Returns None if not registered
+    /// Load biome definitions from the given datapack sources
+    pub fn load_datapack_definitions(&mut self, sources: &[PathBuf]) {
+        let definitions = datapack_biome::load_biome_definitions(sources);
+        if definitions.is_empty() {
+            debug!("No datapack biome definitions found in configured sources");
+        } else {
+            info!(
+                "Loaded {} biome definition(s) from datapacks",
+                definitions.len()
+            );
+        }
+        self.definitions = definitions;
+    }
+
     pub fn lookup(&self, name: &str) -> Option<u8> {
         self.name_to_id.get(name).copied()
     }
 
-    /// Register a new modded biome, assigning it the next available dynamic ID
-    /// If already registered, returns the existing ID
     pub fn register(&mut self, name: &str) -> Option<u8> {
         // Already registered?
         if let Some(&id) = self.name_to_id.get(name) {
@@ -72,11 +87,21 @@ impl DynamicBiomeRegistry {
         let id = self.next_id;
         self.next_id += 1;
 
-        info!("Registered dynamic biome '{name}' -> internal ID {id}");
-
         // Build biome NBT data for the client registry
-        // This MUST always succeed - the client requires valid NBT for every biome entry
-        let data = build_biome_nbt(name);
+        let (data, gen_biome, source) = match self.definitions.get(name) {
+            Some(def) => (
+                def.network_nbt.clone(),
+                pick_generation_biome(name, Some(def)),
+                "datapack",
+            ),
+            None => (build_biome_nbt(name), pick_generation_biome(name, None), "heuristic"),
+        };
+
+        info!(
+            "Registered dynamic biome '{name}' -> internal ID {id} ({source}, \
+             generates as '{}')",
+            gen_biome.registry_id
+        );
 
         self.name_to_id.insert(name.to_string(), id);
         self.id_to_entry.insert(
@@ -84,6 +109,7 @@ impl DynamicBiomeRegistry {
             DynamicBiomeEntry {
                 name: name.to_string(),
                 data,
+                gen_biome,
             },
         );
 
@@ -91,10 +117,8 @@ impl DynamicBiomeRegistry {
     }
 
     /// Register a modded biome if it's not a vanilla biome
-    /// Returns the dynamic ID if registered, None if vanilla or already known
     pub fn register_if_modded(&mut self, name: &str) -> Option<u8> {
         let stripped = name.strip_prefix("minecraft:").unwrap_or(name);
-        // Check if it's a vanilla biome — if so, don't register dynamically
         if pumpkin_data::chunk::Biome::from_name(stripped).is_some() {
             return None;
         }
@@ -104,9 +128,12 @@ impl DynamicBiomeRegistry {
     /// Get all registered dynamic biome entries as protocol registry entries
     /// for the client configuration phase
     pub fn get_registry_entries(&self) -> Vec<(ResourceLocation, Box<[u8]>)> {
-        self.id_to_entry
-            .values()
-            .map(|entry| (entry.name.clone(), entry.data.clone()))
+        let mut entries: Vec<(u8, &DynamicBiomeEntry)> =
+            self.id_to_entry.iter().map(|(&id, entry)| (id, entry)).collect();
+        entries.sort_unstable_by_key(|(id, _)| *id);
+        entries
+            .into_iter()
+            .map(|(_, entry)| (entry.name.clone(), entry.data.clone()))
             .collect()
     }
 
@@ -126,11 +153,27 @@ impl DynamicBiomeRegistry {
     }
 
     /// Pre-register a list of biome names (from world pre-scan)
-    /// Skips vanilla biomes and already-registered entries
     pub fn preload_biomes(&mut self, names: &[String]) {
         for name in names {
             let _ = self.register_if_modded(name);
         }
+    }
+
+    /// Register every modded biome defined by the loaded datapacks
+    pub fn register_datapack_biomes(&mut self) -> usize {
+        let mut names: Vec<String> = self.definitions.keys().cloned().collect();
+        names.sort_unstable();
+        let before = self.name_to_id.len();
+        for name in names {
+            let _ = self.register_if_modded(&name);
+        }
+        self.name_to_id.len() - before
+    }
+
+    /// True if the world's datapacks provided any biome definitions
+    #[must_use]
+    pub fn has_definitions(&self) -> bool {
+        !self.definitions.is_empty()
     }
 }
 
@@ -140,259 +183,231 @@ impl Default for DynamicBiomeRegistry {
     }
 }
 
-/// Reset the dynamic biome registry.
+/// Reset the dynamic biome registry
 pub fn clear_dynamic_biomes() {
     let mut registry = DYNAMIC_BIOMES.write().unwrap();
     registry.name_to_id.clear();
     registry.id_to_entry.clear();
-    registry.next_id = DYNAMIC_BIOME_START;
+    registry.definitions.clear();
+    registry.next_id = dynamic_biome_start();
     info!("Dynamic biome registry cleared");
 }
 
-/// Build biome NBT data for client sync
-///
-/// This function MUST always return valid NBT bytes. The client crashes with
-/// "Expected non-null compound tag" if a biome registry entry has no data
-///
-/// We use best-effort defaults based on the biome name. For production use,
-/// you should load actual biome definitions from the world's datapack folder
-fn build_biome_nbt(name: &str) -> Box<[u8]> {
-    let mut compound = NbtCompound::new();
+/// Resolve any biome ID to a concrete `&'static Biome`
+#[must_use]
+pub fn resolve_biome(id: u8) -> &'static Biome {
+    if let Some(biome) = Biome::from_id(id) {
+        return biome;
+    }
+    DYNAMIC_BIOMES
+        .read()
+        .unwrap()
+        .id_to_entry
+        .get(&id)
+        .map_or(&Biome::PLAINS, |entry| entry.gen_biome)
+}
 
+fn pick_generation_biome(name: &str, def: Option<&DatapackBiomeDef>) -> &'static Biome {
     let lower = name.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
 
-    // Best-effort temperature/precipitation based on biome name keywords
+    // Cave biomes never reach the surface; map by keyword
+    if has(&["cave", "underground", "mantle", "tunnel"]) {
+        return if has(&["lush", "jungle", "tropical"]) {
+            &Biome::LUSH_CAVES
+        } else if has(&["deep_dark", "sculk", "warden"]) {
+            &Biome::DEEP_DARK
+        } else {
+            &Biome::DRIPSTONE_CAVES
+        };
+    }
+
+    if has(&["ocean", "sea"]) {
+        return if has(&["frozen", "icy"]) {
+            &Biome::FROZEN_OCEAN
+        } else {
+            &Biome::OCEAN
+        };
+    }
+    if has(&["beach", "shore", "coast"]) {
+        return &Biome::BEACH;
+    }
+    if has(&["mangrove"]) {
+        return &Biome::MANGROVE_SWAMP;
+    }
+    if has(&["swamp", "bog", "marsh", "wetland", "bayou"]) {
+        return &Biome::SWAMP;
+    }
+    if has(&["badlands", "mesa"]) {
+        return &Biome::BADLANDS;
+    }
+
+    let temperature = def.map_or(0.5, |d| d.temperature);
+    let downfall = def.map_or(0.5, |d| d.downfall);
+    let has_precipitation = def.is_none_or(|d| d.has_precipitation);
+
+    let mountainous = has(&["peak", "mountain", "cliff", "highland", "summit", "alps"]);
+
+    // Cold
+    if temperature < 0.15 || has(&["frozen", "snow", "ice", "glacier", "tundra", "arctic"]) {
+        if mountainous {
+            return &Biome::FROZEN_PEAKS;
+        }
+        return if downfall > 0.5 {
+            &Biome::SNOWY_TAIGA
+        } else {
+            &Biome::SNOWY_PLAINS
+        };
+    }
+
+    // Hot
+    if temperature >= 1.5 || (!has_precipitation && downfall < 0.1 && temperature >= 1.0) {
+        if has(&["savanna", "shrubland", "steppe", "brushland"]) {
+            return &Biome::SAVANNA;
+        }
+        if has(&["jungle", "rainforest", "tropical"]) {
+            return &Biome::JUNGLE;
+        }
+        return &Biome::DESERT;
+    }
+
+    // Warm/temperate
+    if temperature >= 0.9 {
+        if has(&["jungle", "rainforest", "tropical"]) {
+            return if downfall < 0.6 {
+                &Biome::SPARSE_JUNGLE
+            } else {
+                &Biome::JUNGLE
+            };
+        }
+        if has(&["savanna", "shrubland", "steppe", "brushland"]) {
+            return &Biome::SAVANNA;
+        }
+    }
+
+    if mountainous {
+        return if temperature < 0.3 {
+            &Biome::GROVE
+        } else if downfall < 0.3 {
+            &Biome::STONY_PEAKS
+        } else {
+            &Biome::WINDSWEPT_HILLS
+        };
+    }
+
+    // Temperate land: pick by moisture / forest signals
+    if has(&["dark_forest", "dark forest"]) {
+        return &Biome::DARK_FOREST;
+    }
+    if has(&["taiga", "spruce", "pine", "conifer"]) {
+        return &Biome::TAIGA;
+    }
+    if has(&["meadow", "alpine", "valley", "clearing"]) {
+        return &Biome::MEADOW;
+    }
+    if has(&["forest", "wood", "grove"]) || downfall >= 0.6 {
+        return &Biome::FOREST;
+    }
+
+    &Biome::PLAINS
+}
+
+/// Build best-effort biome NBT for a biome with no datapack definition
+fn build_biome_nbt(name: &str) -> Box<[u8]> {
+    let lower = name.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+
     let (has_precipitation, temperature, downfall) =
-        if lower.contains("desert")
-            || lower.contains("sands")
-            || lower.contains("oasis")
-            || lower.contains("badlands")
-            || lower.contains("mesa")
-        {
+        if has(&["desert", "sands", "oasis", "badlands", "mesa"]) {
             (false, 2.0_f32, 0.0_f32)
-        } else if lower.contains("savanna")
-            || lower.contains("shrubland")
-            || lower.contains("steppe")
-            || lower.contains("brushland")
-        {
+        } else if has(&["savanna", "shrubland", "steppe", "brushland"]) {
             (false, 1.2_f32, 0.0_f32)
-        } else if lower.contains("jungle")
-            || lower.contains("tropical")
-            || lower.contains("rainforest")
-            || lower.contains("kelp")
-        {
+        } else if has(&["jungle", "tropical", "rainforest", "kelp"]) {
             (true, 0.95_f32, 0.9_f32)
-        } else if lower.contains("swamp")
-            || lower.contains("bog")
-            || lower.contains("marsh")
-            || lower.contains("wetland")
-        {
+        } else if has(&["swamp", "bog", "marsh", "wetland"]) {
             (true, 0.8_f32, 0.9_f32)
-        } else if lower.contains("snow")
-            || lower.contains("frozen")
-            || lower.contains("ice")
-            || lower.contains("glacier")
-            || lower.contains("tundra")
-            || lower.contains("siberian")
-        {
+        } else if has(&["snow", "frozen", "ice", "glacier", "tundra", "siberian"]) {
             (true, -0.5_f32, 0.4_f32)
-        } else if lower.contains("mountain")
-            || lower.contains("peak")
-            || lower.contains("cliff")
-            || lower.contains("highland")
-            || lower.contains("canyon")
-            || lower.contains("yosemite")
-        {
+        } else if has(&["mountain", "peak", "cliff", "highland", "canyon", "yosemite"]) {
             (true, 0.2_f32, 0.3_f32)
-        } else if lower.contains("ocean") || lower.contains("sea") {
+        } else if has(&["ocean", "sea"]) {
             (true, 0.5_f32, 0.5_f32)
-        } else if lower.contains("beach")
-            || lower.contains("shore")
-            || lower.contains("cave")
-            || lower.contains("underground")
-        {
+        } else if has(&["beach", "shore", "cave", "underground"]) {
             (true, 0.8_f32, 0.4_f32)
-        } else if lower.contains("inferno")
-            || lower.contains("volcanic")
-            || lower.contains("crater")
-        {
+        } else if has(&["inferno", "volcanic", "crater"]) {
             (false, 2.0_f32, 0.0_f32)
         } else {
-            // Default to plains-like
             (true, 0.8_f32, 0.4_f32)
         };
 
-    compound.put_string(
-        "has_precipitation",
-        if has_precipitation {
-            "true".to_string()
-        } else {
-            "false".to_string()
-        },
-    );
-    compound.put_float("temperature", temperature);
-    compound.put_float("downfall", downfall);
-
-    // Effects — best-effort color choices
-    let (
-        water_color,
-        water_fog_color,
-        fog_color,
-        sky_color,
-        foliage_color,
-        grass_color,
-        has_foliage_override,
-        has_grass_override,
-    ) = if lower.contains("desert")
-        || lower.contains("sands")
-        || lower.contains("oasis")
-        || lower.contains("badlands")
-        || lower.contains("mesa")
-    {
-        (
-            0x3F_76_E4_i32,
-            0x3F_76_E4_i32,
-            0xC0_D8_FF,
-            0x6E_B1_FF,
-            None,
-            Some(0x90_81_4D),
-            false,
-            true,
-        )
-    } else if lower.contains("jungle")
-        || lower.contains("tropical")
-        || lower.contains("rainforest")
-    {
-        (
-            0x3F_76_E4,
-            0x3F_76_E4,
-            0xC0_D8_FF,
-            0x77_A8_FF,
-            None,
-            Some(0x59_C9_3C),
-            false,
-            true,
-        )
-    } else if lower.contains("swamp")
-        || lower.contains("bog")
-        || lower.contains("marsh")
-    {
-        (
-            0x61_7B_64_i32,
-            0x23_23_17,
-            0xC0_D8_FF,
-            0x78_A7_FF,
-            None,
-            Some(0x6A_70_39),
-            false,
-            true,
-        )
-    } else if lower.contains("snow")
-        || lower.contains("frozen")
-        || lower.contains("ice")
-        || lower.contains("glacier")
-        || lower.contains("tundra")
-    {
-        (
-            0x3F_76_E4,
-            0x3F_76_E4,
-            0xC0_D8_FF,
-            0x80_A4_FF,
-            None,
-            Some(0x80_B4_97),
-            false,
-            true,
-        )
-    } else if lower.contains("cherry") || lower.contains("sakura") {
-        (
-            0x5D_B7_EF,
-            0x5D_B7_EF,
-            0xC0_D8_FF,
-            0x7B_A4_FF,
-            Some(0xB6_DB_61),
-            Some(0xB6_DB_61),
-            true,
-            true,
-        )
-    } else if lower.contains("dark") || lower.contains("mushroom") {
-        (
-            0x3F_76_E4,
-            0x3F_76_E4,
-            0xC0_D8_FF,
-            0x78_A7_FF,
-            Some(0x59_AE_30),
-            Some(0x59_AE_30),
-            true,
-            true,
-        )
-    } else if lower.contains("inferno") || lower.contains("volcanic") {
-        (
-            0x3F_76_E4,
-            0x3F_76_E4,
-            0x68_5F_70,
-            0x6C_65_5B,
-            None,
-            Some(0x5A_4D_40),
-            false,
-            true,
-        )
+    // (sky_color, fog_color, water_fog_color, water_color, foliage_color, grass_color)
+    let (sky, fog, water_fog, water, foliage, grass): (
+        i32,
+        i32,
+        i32,
+        i32,
+        Option<i32>,
+        Option<i32>,
+    ) = if has(&["desert", "sands", "oasis", "badlands", "mesa"]) {
+        (0x6EB1FF, 0xC0D8FF, 0x3F76E4, 0x3F76E4, None, Some(0x90814D))
+    } else if has(&["jungle", "tropical", "rainforest"]) {
+        (0x77A8FF, 0xC0D8FF, 0x3F76E4, 0x3F76E4, None, Some(0x59C93C))
+    } else if has(&["swamp", "bog", "marsh"]) {
+        (0x78A7FF, 0xC0D8FF, 0x232317, 0x617B64, None, Some(0x6A7039))
+    } else if has(&["snow", "frozen", "ice", "glacier", "tundra"]) {
+        (0x80A4FF, 0xC0D8FF, 0x3F76E4, 0x3F76E4, None, Some(0x80B497))
+    } else if has(&["cherry", "sakura"]) {
+        (0x7BA4FF, 0xC0D8FF, 0x5DB7EF, 0x5DB7EF, Some(0xB6DB61), Some(0xB6DB61))
+    } else if has(&["dark", "mushroom"]) {
+        (0x78A7FF, 0xC0D8FF, 0x3F76E4, 0x3F76E4, Some(0x59AE30), Some(0x59AE30))
+    } else if has(&["inferno", "volcanic"]) {
+        (0x6C655B, 0x685F70, 0x3F76E4, 0x3F76E4, None, Some(0x5A4D40))
     } else {
-        // Default plains colors
-        (
-            0x3F_76_E4,
-            0x3F_76_E4,
-            0xC0_D8_FF,
-            0x78_A7_FF,
-            None,
-            None,
-            false,
-            false,
-        )
+        (0x78A7FF, 0xC0D8FF, 0x3F76E4, 0x3F76E4, None, None)
     };
 
-    let mut effects = NbtCompound::new();
-    effects.put_int("water_color", water_color);
-    effects.put_int("water_fog_color", water_fog_color);
-    effects.put_int("fog_color", fog_color);
-    effects.put_int("sky_color", sky_color);
-    if has_foliage_override 
-        && let Some(fc) = foliage_color {
-            effects.put_int("foliage_color", fc);
-        }
-    if has_grass_override 
-        && let Some(gc) = grass_color {
-            effects.put_int("grass_color", gc);
-        }
-    compound.put("effects", effects);
+    let mut attributes = Map::new();
+    attributes.insert("minecraft:visual/sky_color".to_string(), Value::from(sky));
+    attributes.insert("minecraft:visual/fog_color".to_string(), Value::from(fog));
+    attributes.insert(
+        "minecraft:visual/water_fog_color".to_string(),
+        Value::from(water_fog),
+    );
 
-    // Mood sound (required by some clients)
-    let mut mood_sound = NbtCompound::new();
-    mood_sound.put_string("sound", "minecraft:ambient.cave".to_string());
-    mood_sound.put_int("tick_delay", 6000);
-    mood_sound.put_int("block_search_extent", 8);
-    mood_sound.put_float("offset", 2.0_f32);
-    compound.put("mood_sound", mood_sound);
+    let mut effects = Map::new();
+    effects.insert("water_color".to_string(), Value::from(water));
+    if let Some(foliage) = foliage {
+        effects.insert("foliage_color".to_string(), Value::from(foliage));
+    }
+    if let Some(grass) = grass {
+        effects.insert("grass_color".to_string(), Value::from(grass));
+    }
 
+    let mut root = Map::new();
+    root.insert(
+        "has_precipitation".to_string(),
+        Value::Bool(has_precipitation),
+    );
+    root.insert("temperature".to_string(), Value::from(temperature));
+    root.insert("downfall".to_string(), Value::from(downfall));
+    root.insert("attributes".to_string(), Value::Object(attributes));
+    root.insert("effects".to_string(), Value::Object(effects));
+
+    let value = Value::Object(root);
     let mut buf = Vec::new();
-    match pumpkin_nbt::to_bytes(&compound, &mut buf) {
+    match pumpkin_nbt::to_bytes_unnamed(&value, &mut buf) {
         Ok(()) => buf.into_boxed_slice(),
         Err(e) => {
-            // This should never happen with our controlled data, but if it does,
-            // create an absolute minimal valid compound to prevent client crashes
             warn!("Failed to serialize biome NBT for {name}: {e}. Using minimal fallback.");
-            let mut fallback = NbtCompound::new();
-            fallback.put_string("has_precipitation", "true".to_string());
-            fallback.put_float("temperature", 0.8_f32);
-            fallback.put_float("downfall", 0.4_f32);
-            let mut fb_effects = NbtCompound::new();
-            fb_effects.put_int("water_color", 0x3F_76_E4);
-            fb_effects.put_int("water_fog_color", 0x3F_76_E4);
-            fb_effects.put_int("fog_color", 0xC0_D8_FF);
-            fb_effects.put_int("sky_color", 0x78_A7_FF);
-            fallback.put("effects", fb_effects);
+            let fallback = serde_json::json!({
+                "has_precipitation": true,
+                "temperature": 0.8_f32,
+                "downfall": 0.4_f32,
+                "attributes": { "minecraft:visual/sky_color": 0x78_A7_FF },
+                "effects": { "water_color": 0x3F_76_E4 },
+            });
             let mut fb_buf = Vec::new();
-            // This absolutely must succeed
-            pumpkin_nbt::to_bytes(&fallback, &mut fb_buf)
+            pumpkin_nbt::to_bytes_unnamed(&fallback, &mut fb_buf)
                 .expect("Minimal fallback NBT must always serialize");
             fb_buf.into_boxed_slice()
         }
@@ -400,56 +415,50 @@ fn build_biome_nbt(name: &str) -> Box<[u8]> {
 }
 
 /// Pre-scan region files to discover modded biome names before any client connects
-/// This ensures all dynamic biomes are registered in time for the registry sync
-///
-/// This function efficiently scans Anvil region files without fully parsing chunks
-/// It reads the chunk headers, decompresses chunk data, and extracts biome palette entries
 pub fn discover_modded_biomes_from_region_files(
     region_folder: &std::path::Path,
 ) -> Vec<String> {
-    let mut discovered = Vec::new();
-
-    let entries = match std::fs::read_dir(region_folder) {
-        Ok(e) => e,
+    let paths: Vec<PathBuf> = match std::fs::read_dir(region_folder) {
+        Ok(entries) => entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "mca"))
+            .collect(),
         Err(e) => {
             debug!("Cannot read region folder for biome discovery: {e}");
-            return discovered;
+            return Vec::new();
         }
     };
+    if paths.is_empty() {
+        return Vec::new();
+    }
 
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        let path = entry.path();
-        if path.extension().is_none_or(|ext| ext != "mca") {
-            continue;
-        }
-
-        match scan_region_file_for_biomes(&path) {
-            Ok(names) => {
-                for name in names {
-                    // Only keep modded (non-vanilla) biomes
-                    let stripped = name.strip_prefix("minecraft:").unwrap_or(&name);
-                    if pumpkin_data::chunk::Biome::from_name(stripped).is_none()
-                        && !discovered.contains(&name)
-                    {
-                        discovered.push(name);
-                    }
-                }
-            }
+    // Scan region files in parallel, each yielding the non-vanilla
+    // biome names it contains, then union the results
+    let discovered: std::collections::BTreeSet<String> = paths
+        .par_iter()
+        .flat_map(|path| match scan_region_file_for_biomes(path) {
+            Ok(names) => names
+                .into_iter()
+                .filter(|name| {
+                    let stripped = name.strip_prefix("minecraft:").unwrap_or(name);
+                    pumpkin_data::chunk::Biome::from_name(stripped).is_none()
+                })
+                .collect::<Vec<_>>(),
             Err(e) => {
                 debug!("Failed to scan region file {} for biomes: {e}", path.display());
+                Vec::new()
             }
-        }
-    }
+        })
+        .collect();
+
+    let discovered: Vec<String> = discovered.into_iter().collect();
 
     if !discovered.is_empty() {
         info!(
-            "Discovered {} modded biome(s) from region files: {}",
+            "Discovered {} modded biome(s) from {} region file(s): {}",
             discovered.len(),
+            paths.len(),
             discovered.join(", ")
         );
     }
@@ -458,8 +467,6 @@ pub fn discover_modded_biomes_from_region_files(
 }
 
 /// Scan a single region file for modded biome names
-/// This reads the region file header, then for each present chunk,
-/// decompresses and parses just enough NBT to extract biome palette entries
 fn scan_region_file_for_biomes(path: &std::path::Path) -> Result<Vec<String>, std::io::Error> {
     use flate2::read::ZlibDecoder;
 
@@ -560,41 +567,127 @@ fn scan_region_file_for_biomes(path: &std::path::Path) -> Result<Vec<String>, st
     Ok(names)
 }
 
+#[derive(serde::Deserialize)]
+struct BiomeScanRoot {
+    #[serde(default)]
+    sections: Vec<BiomeScanSection>,
+}
+
+#[derive(serde::Deserialize)]
+struct BiomeScanSection {
+    #[serde(default)]
+    biomes: Option<BiomeScanBiomes>,
+}
+
+#[derive(serde::Deserialize)]
+struct BiomeScanBiomes {
+    #[serde(default)]
+    palette: Vec<String>,
+}
+
 /// Extract biome palette names from chunk NBT data
-/// This is a lightweight extraction that doesn't fully deserialize the chunk
 fn extract_biome_names_from_nbt(data: &[u8]) -> Vec<String> {
+    let root = pumpkin_nbt::from_bytes::<BiomeScanRoot>(std::io::Cursor::new(data))
+        .or_else(|_| pumpkin_nbt::from_bytes_unnamed::<BiomeScanRoot>(std::io::Cursor::new(data)));
+
+    let Ok(root) = root else {
+        return Vec::new();
+    };
+
     let mut names = Vec::new();
-
-    // Try parsing as AnvilChunkRoot (named NBT)
-    if let Ok(root) = pumpkin_nbt::from_bytes::<super::format::anvil::AnvilChunkRoot>(
-        std::io::Cursor::new(data),
-    ) {
-        for section in &root.sections {
-            if let Some(biomes) = &section.biomes {
-                for name in &biomes.palette {
-                    if !names.contains(name) {
-                        names.push(name.clone());
-                    }
-                }
-            }
-        }
-        return names;
-    }
-
-    // Try unnamed root
-    if let Ok(root) = pumpkin_nbt::from_bytes_unnamed::<super::format::anvil::AnvilChunkRoot>(
-        std::io::Cursor::new(data),
-    ) {
-        for section in &root.sections {
-            if let Some(biomes) = &section.biomes {
-                for name in &biomes.palette {
-                    if !names.contains(name) {
-                        names.push(name.clone());
-                    }
+    for section in root.sections {
+        if let Some(biomes) = section.biomes {
+            for name in biomes.palette {
+                if !names.contains(&name) {
+                    names.push(name);
                 }
             }
         }
     }
-
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dynamic_start_sits_immediately_after_vanilla_biomes() {
+        let start = dynamic_biome_start();
+        assert!(start > 0, "expected at least one vanilla biome");
+        assert!(
+            Biome::from_id(start).is_none(),
+            "dynamic start {start} collides with a vanilla biome"
+        );
+        assert!(
+            Biome::from_id(start - 1).is_some(),
+            "there should be no gap before the dynamic start {start}"
+        );
+    }
+
+    #[test]
+    fn registry_entries_are_ordered_by_internal_id() {
+        let mut registry = DynamicBiomeRegistry::new();
+        let base = dynamic_biome_start();
+        let order = ["zeta:a", "alpha:b", "mu:c", "beta:d", "nu:e"];
+        for name in order {
+            registry.register(name);
+        }
+
+        let entries = registry.get_registry_entries();
+        assert_eq!(entries.len(), order.len());
+
+        for (i, (name, _data)) in entries.iter().enumerate() {
+            assert_eq!(name, order[i], "entry {i} is out of internal-id order");
+            assert_eq!(registry.lookup(name), Some(base + i as u8));
+        }
+    }
+
+    #[test]
+    fn register_datapack_biomes_registers_modded_only_in_sorted_order() {
+        let mut registry = DynamicBiomeRegistry::new();
+        let base = dynamic_biome_start();
+        let def = |t| DatapackBiomeDef {
+            network_nbt: Box::<[u8]>::default(),
+            temperature: t,
+            downfall: 0.5,
+            has_precipitation: true,
+        };
+        // Includes a vanilla `minecraft:` override that must be skipped
+        registry.definitions.insert("terralith:zebra".into(), def(0.5));
+        registry.definitions.insert("terralith:apple".into(), def(0.5));
+        registry.definitions.insert("minecraft:plains".into(), def(0.5));
+
+        let count = registry.register_datapack_biomes();
+
+        assert_eq!(count, 2, "only the two modded biomes should register");
+        // Registered in sorted name order → deterministic ids
+        assert_eq!(registry.lookup("terralith:apple"), Some(base));
+        assert_eq!(registry.lookup("terralith:zebra"), Some(base + 1));
+        assert_eq!(registry.lookup("minecraft:plains"), None);
+        assert!(registry.has_definitions());
+    }
+
+    /// Times the (now parallel + biome-only) region scan on a real world
+    /// Ignored by default; point it at a folder and run:
+    /// `BIOME_SCAN_DIR="<path to .../region>" cargo test -p pumpkin-world -- --ignored --nocapture times_region_scan`
+    #[test]
+    #[ignore = "requires a local world; manual benchmark"]
+    fn times_region_scan() {
+        let dir = std::env::var("BIOME_SCAN_DIR").unwrap_or_else(|_| {
+            r"C:\Users\sgibe\AppData\Roaming\Modularium\Minecraft\packs\26.2\saves\26_2\dimensions\minecraft\overworld\region".to_string()
+        });
+        let path = std::path::Path::new(&dir);
+        if !path.is_dir() {
+            eprintln!("skipping: {dir} not present");
+            return;
+        }
+        let start = std::time::Instant::now();
+        let discovered = discover_modded_biomes_from_region_files(path);
+        eprintln!(
+            "scanned {dir} in {:?}: {} modded biome(s)",
+            start.elapsed(),
+            discovered.len()
+        );
+    }
 }

@@ -3584,54 +3584,87 @@ impl World {
                     continue 'main;
                 }
 
-                // Add all new Entities to the world
-                let mut entities_to_add: Vec<Arc<dyn EntityBase>> = Vec::new();
-                for entity_nbt in chunk.data.lock().await.iter() {
-                    let Some(id) = entity_nbt.get_string("id") else {
-                        debug!("Entity has no ID");
-                        continue;
-                    };
-                    let Some(entity_type) =
-                        EntityType::from_name(id.strip_prefix("minecraft:").unwrap_or(id))
-                    else {
-                        warn!("Entity has no valid Entity Type {id}");
-                        continue;
-                    };
+                if first_load {
+                    // First time this chunk's entities load from disk: create them
+                    // from NBT, spawn them to the player, and track them in the world
+                    // so they can be ticked, saved, and interacted with
+                    //
+                    // Dedupe by the entity's persistent UUID so a concurrent load of
+                    // the same chunk can't track/spawn the same mob twice
+                    let mut seen_uuids: std::collections::HashSet<Uuid> = world
+                        .entities
+                        .load()
+                        .iter()
+                        .map(|e| e.get_entity().entity_uuid)
+                        .collect();
 
-                    // Pos is zero since it will read from nbt
-                    let entity = from_type(
-                        entity_type,
-                        Vector3::new(0.0, 0.0, 0.0),
-                        &world,
-                        Uuid::new_v4(),
-                    );
-                    entity.read_nbt_non_mut(entity_nbt).await;
+                    let mut entities_to_add: Vec<Arc<dyn EntityBase>> = Vec::new();
+                    for entity_nbt in chunk.data.lock().await.iter() {
+                        let Some(id) = entity_nbt.get_string("id") else {
+                            debug!("Entity has no ID");
+                            continue;
+                        };
+                        let Some(entity_type) =
+                            EntityType::from_name(id.strip_prefix("minecraft:").unwrap_or(id))
+                        else {
+                            warn!("Entity has no valid Entity Type {id}");
+                            continue;
+                        };
 
-                    entity.init_data_tracker().await;
+                        // Preserve the entity's persistent UUID
+                        let uuid = entity_nbt
+                            .get_int_array("UUID")
+                            .filter(|a| a.len() == 4)
+                            .map_or_else(Uuid::new_v4, |a| {
+                                let hi_hi = u128::from(a[0] as u32);
+                                let hi_lo = u128::from(a[1] as u32);
+                                let lo_hi = u128::from(a[2] as u32);
+                                let lo_lo = u128::from(a[3] as u32);
+                                Uuid::from_u128(
+                                    (hi_hi << 96) | (hi_lo << 64) | (lo_hi << 32) | lo_lo,
+                                )
+                            });
 
-                    let base_entity = entity.get_entity();
+                        if !seen_uuids.insert(uuid) {
+                            continue;
+                        }
 
-                    // Clear velocity so the client does not replay the drop animation.
-                    // Items at rest on the ground should have zero velocity; any
-                    // residual velocity from the original drop is stale data.
-                    base_entity.velocity.store(Vector3::default());
+                        // Pos is zero since it will read from nbt
+                        let entity =
+                            from_type(entity_type, Vector3::new(0.0, 0.0, 0.0), &world, uuid);
+                        entity.read_nbt_non_mut(entity_nbt).await;
 
-                    player
-                        .client
-                        .enqueue_packet(&base_entity.create_spawn_packet())
-                        .await;
+                        entity.init_data_tracker().await;
 
-                    if first_load {
+                        let base_entity = entity.get_entity();
+
+                        // Clear velocity so the client does not replay the drop animation
+                        base_entity.velocity.store(Vector3::default());
+
+                        player
+                            .client
+                            .enqueue_packet(&base_entity.create_spawn_packet())
+                            .await;
+
                         entities_to_add.push(entity);
                     }
-                }
 
-                if first_load && !entities_to_add.is_empty() {
-                    world.entities.rcu(|current_entities| {
-                        let mut new_entities = (**current_entities).clone();
-                        new_entities.extend(entities_to_add.iter().cloned());
-                        new_entities
-                    });
+                    if !entities_to_add.is_empty() {
+                        world.entities.rcu(|current_entities| {
+                            let mut new_entities = (**current_entities).clone();
+                            new_entities.extend(entities_to_add.iter().cloned());
+                            new_entities
+                        });
+                    }
+                } else {
+                    for entity in world.entities.load().iter() {
+                        if entity.get_entity().chunk_pos.load() == position {
+                            player
+                                .client
+                                .enqueue_packet(&entity.get_entity().create_spawn_packet())
+                                .await;
+                        }
+                    }
                 }
             }
 

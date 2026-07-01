@@ -23,7 +23,7 @@ use pumpkin_data::dimension::Dimension;
 use pumpkin_data::{Block, BlockStateId, block_properties::has_random_ticks, fluid::Fluid};
 use pumpkin_util::math::{position::BlockPos, vector2::Vector2};
 use pumpkin_util::world_seed::Seed;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use std::{
@@ -120,6 +120,7 @@ pub struct LevelFolder {
     pub root_folder: PathBuf,
     pub region_folder: PathBuf,
     pub entities_folder: PathBuf,
+    pub poi_folder: PathBuf,
 }
 
 impl Level {
@@ -160,9 +161,11 @@ impl Level {
             };
 
         let entities_folder = root_folder.join("entities");
+        let poi_folder = root_folder.join("poi");
 
         std::fs::create_dir_all(&region_folder).expect("Failed to create Region folder");
         std::fs::create_dir_all(&entities_folder).expect("Failed to create Entities folder");
+        std::fs::create_dir_all(&poi_folder).expect("Failed to create POI folder");
 
         // Auto-detect existing world formats
         fn has_extension(folder: &PathBuf, ext: &str) -> bool {
@@ -186,25 +189,54 @@ impl Level {
             level_config.chunk.clone()
         };
 
-        // Reset dynamic biome registry when loading a new world,
-        // then pre-scan region files to discover modded biomes.
-        // This must happen BEFORE any client connects so the registry sync
-        // includes all biomes the client will encounter.
         clear_dynamic_biomes();
-        let discovered = discover_modded_biomes_from_region_files(&region_folder);
-        if !discovered.is_empty() {
+
+        // Gather datapack sources
+        let mut datapack_sources: Vec<PathBuf> = Vec::new();
+        let world_datapacks = root_folder.join("datapacks");
+        if world_datapacks.is_dir() {
+            datapack_sources.push(world_datapacks);
+        }
+        datapack_sources.extend(level_config.datapack_paths.iter().cloned());
+
+        // Fast path
+        let registered_from_datapacks = if datapack_sources.is_empty() {
+            false
+        } else {
             let mut registry = DYNAMIC_BIOMES.write().unwrap();
-            registry.preload_biomes(&discovered);
-            info!(
-                "Pre-registered {} dynamic biome(s) from world scan",
-                registry.len()
-            );
+            registry.load_datapack_definitions(&datapack_sources);
+            let count = registry.register_datapack_biomes();
+            if count > 0 {
+                info!(
+                    "Registered {count} modded biome(s) from datapacks (skipping region scan)"
+                );
+            }
+            registry.has_definitions()
+        };
+
+        // index and coverage-report the world's worldgen registries (noise_settings/density_function/…)
+        if !datapack_sources.is_empty() {
+            let _worldgen = crate::generation::datapack::WorldgenData::load(&datapack_sources);
+        }
+
+        // Scan region files if the datapacks didn't provide biome definitions
+        if !registered_from_datapacks {
+            let discovered = discover_modded_biomes_from_region_files(&region_folder);
+            if !discovered.is_empty() {
+                let mut registry = DYNAMIC_BIOMES.write().unwrap();
+                registry.preload_biomes(&discovered);
+                info!(
+                    "Pre-registered {} dynamic biome(s) from world scan",
+                    registry.len()
+                );
+            }
         }
 
         let level_folder = Arc::new(LevelFolder {
             root_folder,
             region_folder,
             entities_folder,
+            poi_folder,
         });
 
         let seed = Seed(seed as u64);
@@ -288,7 +320,7 @@ impl Level {
                 let arc_chunk = Arc::new(ChunkEntityData {
                     x: pos.x,
                     z: pos.y,
-                    data: tokio::sync::Mutex::new(FxHashMap::default()),
+                    data: tokio::sync::Mutex::new(Vec::new()),
                     dirty: AtomicBool::new(false),
                 });
 
@@ -309,7 +341,7 @@ impl Level {
                     let arc_chunk = Arc::new(ChunkEntityData {
                         x: pos.x,
                         z: pos.y,
-                        data: tokio::sync::Mutex::new(FxHashMap::default()),
+                        data: tokio::sync::Mutex::new(Vec::new()),
                         dirty: AtomicBool::new(false),
                     });
 

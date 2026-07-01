@@ -10,7 +10,7 @@ use tokio::{
     join,
     sync::{OnceCell, RwLock, mpsc},
 };
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 use crate::{
     chunk::{
@@ -102,11 +102,27 @@ impl<S: ChunkSerializer<WriteBackend = PathBuf>> ChunkSerializerLazyLoader<S> {
         trace!("Opening file from disk: {}", self.path.display());
 
         match tokio::fs::read(&self.path).await {
-            Ok(bytes) => {
-                let value = S::read(bytes.into())?;
-                trace!("Successfully read file from disk: {}", self.path.display());
-                Ok(value)
+            // start from a fresh serializer instead of failing the load/write
+            Ok(bytes) if bytes.is_empty() => {
+                trace!("Empty region file, using default for: {}", self.path.display());
+                Ok(S::default())
             }
+            Ok(bytes) => match S::read(bytes.into()) {
+                Ok(value) => {
+                    trace!("Successfully read file from disk: {}", self.path.display());
+                    Ok(value)
+                }
+                // A file too small to hold the region header contains
+                //  no chunk data; treat it as empty rather than aborting
+                Err(ChunkReadingError::InvalidHeader) => {
+                    warn!(
+                        "Region file {} has a truncated/invalid header; treating as empty",
+                        self.path.display()
+                    );
+                    Ok(S::default())
+                }
+                Err(err) => Err(err),
+            },
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 trace!("File not found, using default for: {}", self.path.display());
                 Ok(S::default())

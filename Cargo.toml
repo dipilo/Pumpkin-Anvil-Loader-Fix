@@ -86,6 +86,12 @@ lto = true
 strip = "debuginfo"
 codegen-units = 1
 
+[profile.release-dev]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true
+
 [profile.bench]
 debug = true
 
@@ -141,6 +147,7 @@ itertools = { version = "0.15.0", default-features = false, features = ["use_std
 libloading = { version = "0.9", default-features = false, features = ["std"] }
 lru = { version = "0.18.0", default-features = false }
 lz4-java-wrc = { version = "0.2.0", default-features = false, features = ["lz4_flex"] }
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 md5 = { version = "0.8", default-features = false }
 num-bigint = { version = "0.4", default-features = false, features = ["std"] }
 num-derive = { version = "0.4", default-features = false }
