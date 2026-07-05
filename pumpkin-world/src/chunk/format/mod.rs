@@ -48,7 +48,7 @@ impl SingleChunkDataSerializer for ChunkData {
     fn to_bytes(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Bytes, ChunkSerializingError>> + Send + '_>> {
-        Box::pin(async move { self.internal_to_bytes().await })
+        Box::pin(async move { self.internal_to_bytes() })
     }
 
     #[inline]
@@ -203,7 +203,41 @@ impl ChunkData {
         Self::from_chunk_nbt(chunk_nbt, position)
     }
 
+<<<<<<< HEAD
+    pub fn internal_from_bytes(
+        chunk_data: &[u8],
+        position: Vector2<i32>,
+    ) -> Result<Self, ChunkParsingError> {
+        // 1. Try vanilla Anvil / datapack-world format first
+        //    This is a named-root NBT compound
+        if let Ok(anvil_root) = pumpkin_nbt::from_bytes::<anvil::AnvilChunkRoot>(
+            std::io::Cursor::new(chunk_data),
+        ) {
+            let chunk_nbt = convert_anvil_root_to_chunk_nbt(anvil_root)?;
+            return Self::from_chunk_nbt(chunk_nbt, position);
+        }
+
+        // 2. Fallback to Pumpkin's native/internal format
+        //    This is the only place where unnamed-root parsing makes sense
+        let chunk_nbt = pumpkin_nbt::from_bytes_unnamed::<ChunkNbt>(
+            std::io::Cursor::new(chunk_data),
+        )
+        .map_err(|e| ChunkParsingError::ErrorDeserializingChunk(e.to_string()))?;
+
+        Self::from_chunk_nbt(chunk_nbt, position)
+    }
+
     async fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
+=======
+    fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
+        fn extract_light_ref(light: Option<&LightContainer>) -> Option<&[u8]> {
+            match light {
+                Some(LightContainer::Full(data)) => Some(data.as_ref()),
+                _ => None,
+            }
+        }
+
+>>>>>>> 3aea5ee720671c9a2a654595220cd6eb909f4fde
         let is_light_correct = self
             .light_populated
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -212,13 +246,6 @@ impl ChunkData {
             let entities_guard = self.pending_block_entities.lock().unwrap();
             entities_guard.values().cloned().collect::<Vec<_>>()
         };
-
-        fn extract_light_ref(light: Option<&LightContainer>) -> Option<&[u8]> {
-            match light {
-                Some(LightContainer::Full(data)) => Some(data.as_ref()),
-                _ => None,
-            }
-        }
 
         let light_lock = self.light_engine.lock().unwrap();
         let heightmap_lock = self.heightmap.lock().unwrap();
