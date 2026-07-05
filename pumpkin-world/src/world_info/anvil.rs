@@ -182,7 +182,6 @@ mod test {
     use pumpkin_data::game_rules::GameRuleRegistry;
     use pumpkin_nbt::{deserializer::from_bytes, serializer::to_bytes};
     use pumpkin_util::{Difficulty, world_seed::Seed};
-    use std::assert_matches;
     use std::{
         fs,
         io::{Cursor, Read},
@@ -330,6 +329,9 @@ mod test {
         .unwrap();
 
         let result = AnvilLevelInfo.read_world_info(temp_dir.path());
-        assert_matches!(result, Err(WorldInfoError::UnsupportedDataVersion(_)));
+        assert!(matches!(
+            result,
+            Err(WorldInfoError::UnsupportedDataVersion(_))
+        ));
     }
 }

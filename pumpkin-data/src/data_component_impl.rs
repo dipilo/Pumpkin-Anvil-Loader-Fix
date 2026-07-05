@@ -2347,6 +2347,7 @@ impl DataComponentImpl for ContainerImpl {
     default_impl!(Container);
 }
 #[derive(Clone, Debug)]
+#[allow(clippy::disallowed_types)]
 pub struct BlockStateImpl {
     pub properties: BTreeMap<String, String>,
 }
@@ -2367,6 +2368,7 @@ impl std::hash::Hash for BlockStateImpl {
     }
 }
 impl BlockStateImpl {
+    #[allow(clippy::disallowed_types)]
     fn read_data(data: &NbtTag) -> Option<Self> {
         let compound = data.extract_compound()?;
         let mut properties = BTreeMap::new();
