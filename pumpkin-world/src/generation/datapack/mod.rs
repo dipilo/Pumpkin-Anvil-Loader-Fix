@@ -28,7 +28,7 @@ impl WorldgenData {
 
     /// The raw JSON index (`namespace:path` → JSON) per category
     #[must_use]
-    pub fn raw(&self) -> &RawWorldgen {
+    pub const fn raw(&self) -> &RawWorldgen {
         &self.raw
     }
 
@@ -198,6 +198,7 @@ mod tests {
     /// `WORLDGEN_PACK_DIR="<path to datapacks>" cargo test -p pumpkin-world -- --ignored --nocapture parses_real_terralith`
     #[test]
     #[ignore = "requires local datapacks; set WORLDGEN_PACK_DIR"]
+    #[allow(clippy::print_stderr)]
     fn parses_real_terralith() {
         let Some(dir) = std::env::var_os("WORLDGEN_PACK_DIR").map(PathBuf::from) else {
             eprintln!("skipping: set WORLDGEN_PACK_DIR to a datapacks folder to run this test");

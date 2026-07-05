@@ -115,9 +115,8 @@ fn collect_from_path(path: &Path, depth: usize, out: &mut HashMap<String, Datapa
 /// Scan an unpacked datapack folder for `data/<ns>/worldgen/biome/**.json` files
 fn scan_folder_datapack(root: &Path, out: &mut HashMap<String, DatapackBiomeDef>) {
     let data_dir = root.join("data");
-    let namespaces = match std::fs::read_dir(&data_dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(namespaces) = std::fs::read_dir(&data_dir) else {
+        return;
     };
     for ns_entry in namespaces.flatten() {
         let ns_path = ns_entry.path();
@@ -138,14 +137,13 @@ fn scan_folder_datapack(root: &Path, out: &mut HashMap<String, DatapackBiomeDef>
             let Some(biome_path) = biome_id_from_relative(relative) else {
                 continue;
             };
-            let mut contents = String::new();
-            match File::open(&file).and_then(|mut f| f.read_to_string(&mut contents)) {
-                Ok(_) => {}
+            let contents = match std::fs::read_to_string(&file) {
+                Ok(c) => c,
                 Err(e) => {
                     debug!("Failed to read biome file {}: {e}", file.display());
                     continue;
                 }
-            }
+            };
             insert_biome(&namespace, &biome_path, &contents, out);
         }
     }
@@ -153,9 +151,8 @@ fn scan_folder_datapack(root: &Path, out: &mut HashMap<String, DatapackBiomeDef>
 
 /// Recursively collect `.json` files under `dir`
 fn collect_json_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
     for entry in entries.flatten() {
         let path = entry.path();

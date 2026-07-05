@@ -7,6 +7,8 @@ use crate::command::errors::command_syntax_error::CommandSyntaxError;
 use crate::command::errors::error_types::CommandErrorType;
 use crate::command::string_reader::StringReader;
 use crate::command::suggestion::suggestions::SuggestionsBuilder;
+use pumpkin_data::entity::EntityType;
+use pumpkin_data::tag::Taggable;
 use pumpkin_data::translation;
 use pumpkin_util::GameMode;
 use pumpkin_util::math::bounds::{DoubleBounds, FloatDegreeBounds, IntBounds};
@@ -40,6 +42,10 @@ pub const SORT_UNKNOWN_ERROR_TYPE: CommandErrorType<1> = CommandErrorType::new(
 pub const GAMEMODE_INVALID_ERROR_TYPE: CommandErrorType<1> = CommandErrorType::new(
     translation::java::ARGUMENT_ENTITY_OPTIONS_MODE_INVALID,
     translation::java::ARGUMENT_ENTITY_OPTIONS_MODE_INVALID,
+);
+pub const ENTITY_TYPE_INVALID_ERROR_TYPE: CommandErrorType<1> = CommandErrorType::new(
+    translation::java::ARGUMENT_ENTITY_OPTIONS_TYPE_INVALID,
+    translation::java::ARGUMENT_ENTITY_OPTIONS_TYPE_INVALID,
 );
 
 /// Options to customize an [`EntitySelectorParser`].
@@ -278,11 +284,71 @@ impl EntitySelectorOption {
                         .create(parser.reader, TextComponent::text(string)))
                 }
             }
+            Self::Type => Self::parse_type_option(parser),
             _ => {
                 tracing::warn!("Unimplemented entity selector option: {:?}", self);
                 Err(UNKNOWN_OPTION_ERROR_TYPE.create_without_context(self.name_component()))
             }
         }
+    }
+
+    /// Parses a `type=` option value: a plain entity type (`cow`, `minecraft:cow`),
+    /// an entity-type tag (`#minecraft:undead`), each optionally negated with `!`
+    fn parse_type_option(
+        parser: &mut EntitySelectorParser,
+    ) -> Result<(), CommandSyntaxError> {
+        let invert = parser.consume_inverted_start();
+        if invert {
+            parser.set_flag(Flags::ENTITY_TYPE_INVERTED, true);
+        }
+        let is_tag = parser.consume_tag_start();
+        let start = parser.reader.cursor();
+
+        // Read a resource location. `read_unquoted_string` stops at ':' so we read
+        // the namespaced id manually (unquoted chars plus ':')
+        let mut loc = String::new();
+        while let Some(c) = parser.reader.peek() {
+            if StringReader::is_allowed_in_unquoted_string(c) || c == ':' {
+                loc.push(c);
+                parser.reader.skip();
+            } else {
+                break;
+            }
+        }
+        // Default to the `minecraft` namespace when none is given
+        let full = if loc.contains(':') {
+            loc.clone()
+        } else {
+            format!("minecraft:{loc}")
+        };
+
+        if is_tag {
+            // Validate the entity-type tag exists
+            if <EntityType as Taggable>::get_tag_values(&full).is_none() {
+                parser.reader.set_cursor(start);
+                return Err(ENTITY_TYPE_INVALID_ERROR_TYPE
+                    .create(parser.reader, TextComponent::text(full)));
+            }
+            if !invert {
+                parser.set_includes_entities(true);
+            }
+            parser.add_predicate(EntitySelectorPredicate::EntityTypeTag(full, invert));
+        } else {
+            let name = full.strip_prefix("minecraft:").unwrap_or(&full);
+            let Some(entity_type) = EntityType::from_name(name) else {
+                parser.reader.set_cursor(start);
+                return Err(ENTITY_TYPE_INVALID_ERROR_TYPE
+                    .create(parser.reader, TextComponent::text(full)));
+            };
+            if !invert {
+                // A single positive type; recorded so `type=` cannot be specified
+                // twice (matching vanilla's `can_use`)
+                parser.entity_type = Some(entity_type);
+                parser.set_includes_entities(true);
+            }
+            parser.add_predicate(EntitySelectorPredicate::EntityType(entity_type, invert));
+        }
+        Ok(())
     }
 
     /// Returns whether this option can be used by the provided [`EntitySelectorParser`].

@@ -373,6 +373,24 @@ impl World {
         self.level.shutdown().await;
     }
 
+    /// Extract an entity's persistent UUID from its saved NBT
+    fn entity_nbt_uuid(nbt: &NbtCompound) -> Option<u128> {
+        let a = nbt.get_int_array("UUID").filter(|a| a.len() == 4)?;
+        Some(
+            (u128::from(a[0] as u32) << 96)
+                | (u128::from(a[1] as u32) << 64)
+                | (u128::from(a[2] as u32) << 32)
+                | u128::from(a[3] as u32),
+        )
+    }
+
+    fn upsert_entity_nbt(data: &mut Vec<NbtCompound>, nbt: NbtCompound) {
+        if let Some(uuid) = Self::entity_nbt_uuid(&nbt) {
+            data.retain(|existing| Self::entity_nbt_uuid(existing) != Some(uuid));
+        }
+        data.push(nbt);
+    }
+
     async fn save_entity(&self, entity: &Arc<dyn EntityBase>) {
         // First lets see if the entity was saved on an other chunk, and if the current chunk does not match we remove it
         // Otherwise we just update the nbt data
@@ -387,19 +405,30 @@ impl World {
             chunk.mark_dirty(true);
             let mut data = chunk.data.lock().await;
             if old_chunk == current_chunk_coordinate {
-                data.push(nbt);
+                Self::upsert_entity_nbt(&mut data, nbt);
                 return;
             }
 
-            // The chunk has changed, lets remove the entity from the old chunk
-            // TODO?
-            data.clear();
+            // The chunk has changed, remove this entity's stale copy from the old
+            // chunk (by UUID) rather than clearing every entity saved there
+            if let Some(uuid) = Self::entity_nbt_uuid(&nbt) {
+                data.retain(|existing| Self::entity_nbt_uuid(existing) != Some(uuid));
+            }
         }
         // We did not continue, so lets save data in a new chunk
         let chunk = self.level.get_entity_chunk(current_chunk_coordinate).await;
         let mut data = chunk.data.lock().await;
-        data.push(nbt);
+        Self::upsert_entity_nbt(&mut data, nbt);
+        drop(data);
         chunk.mark_dirty(true);
+
+        // Remember the entity is now persisted in this chunk, so a subsequent move
+        // removes THIS copy rather than leaving an orphan in an intermediate chunk
+        base_entity.first_loaded_chunk_position.store(Some(Vector3::new(
+            current_chunk_coordinate.x,
+            0,
+            current_chunk_coordinate.y,
+        )));
     }
 
     /// Sends an entity status update to all players tracking the specified entity.
@@ -531,13 +560,16 @@ impl World {
     /// **Note:** This function acquires a lock on the `current_players` map, ensuring thread safety.
     pub fn broadcast_packet_all<P: ClientPacket>(&self, packet: &P) {
         let players = self.players.load();
-        let recipients_by_version = Self::collect_java_recipients_by_version(players.iter());
+        // Skip clients still loading into the world (null ClientLevel)
+        let recipients_by_version = Self::collect_java_recipients_by_version(
+            players.iter().filter(|p| p.has_client_loaded()),
+        );
         Self::broadcast_java_grouped(packet, recipients_by_version);
     }
 
     pub fn broadcast_packet_all_sync<P: ClientPacket>(&self, packet: &P) {
         let players = self.players.load();
-        for player in players.iter() {
+        for player in players.iter().filter(|p| p.has_client_loaded()) {
             match player.client.as_ref() {
                 ClientPlatform::Java(java) => {
                     if let Ok(data) =
@@ -602,10 +634,12 @@ impl World {
         be_packet: &B,
     ) {
         let players = self.players.load();
-        let je_recipients_by_version = Self::collect_java_recipients_by_version(players.iter());
+        let je_recipients_by_version = Self::collect_java_recipients_by_version(
+            players.iter().filter(|p| p.has_client_loaded()),
+        );
         let mut be_recipients = Vec::new();
 
-        for player in players.iter() {
+        for player in players.iter().filter(|p| p.has_client_loaded()) {
             if let ClientPlatform::Bedrock(be_client) = player.client.as_ref() {
                 be_recipients.push(be_client.clone());
             }
@@ -3580,52 +3614,10 @@ impl World {
 
                 if !level.is_chunk_watched(&position) {
                     trace!(
-                        "Received chunk {:?}, but it is no longer watched... cleaning",
+                        "Received chunk {:?}, but it is no longer watched... skipping",
                         &position
                     );
 
-                    if first_load {
-                        for entity_nbt in chunk.data.lock().await.iter() {
-                            let Some(id) = entity_nbt.get_string("id") else {
-                                continue;
-                            };
-                            let Some(entity_type) =
-                                EntityType::from_name(id.strip_prefix("minecraft:").unwrap_or(id))
-                            else {
-                                continue;
-                            };
-
-                            let entity = from_type(
-                                entity_type,
-                                Vector3::new(0.0, 0.0, 0.0),
-                                &world,
-                                Uuid::new_v4(),
-                            );
-                            entity.read_nbt_non_mut(entity_nbt).await;
-                            let base_entity = entity.get_entity();
-
-                            let mut nbt = NbtCompound::new();
-                            entity.write_nbt(&mut nbt).await;
-
-                            if let Some(old_chunk) = base_entity.first_loaded_chunk_position.load()
-                            {
-                                let old_chunk = old_chunk.to_vec2_i32();
-                                let chunk = world.level.get_entity_chunk(old_chunk).await;
-                                chunk.mark_dirty(true);
-                                let current_chunk_coordinate =
-                                    base_entity.block_pos.load().chunk_position();
-
-                                let mut data = chunk.data.lock().await;
-                                if old_chunk == current_chunk_coordinate {
-                                    data.push(nbt);
-                                    continue;
-                                }
-
-                                // The chunk has changed, lets remove the entity from the old chunk
-                                data.clear();
-                            }
-                        }
-                    }
                     continue 'main;
                 }
 
@@ -3673,13 +3665,14 @@ impl World {
                         if !seen_uuids.insert(uuid) {
                             continue;
                         }
-
                         // Pos is zero since it will read from nbt
                         let entity =
                             from_type(entity_type, Vector3::new(0.0, 0.0, 0.0), &world, uuid);
                         entity.read_nbt_non_mut(entity_nbt).await;
 
                         entity.init_data_tracker().await;
+
+                        world.spawn_state.load().add_entity(&world, entity.as_ref());
 
                         let base_entity = entity.get_entity();
 
@@ -4155,6 +4148,10 @@ impl World {
 
         let players = self.players.load();
         for player in players.iter() {
+            // Don't send spawns to a client still loading into the world (null level)
+            if !player.has_client_loaded() {
+                continue;
+            }
             let center = player.get_entity().chunk_pos.load();
             let view_distance = get_view_distance(player).get() as i32;
 
@@ -4187,8 +4184,17 @@ impl World {
         self.spawn_state.load().add_entity(self, entity.as_ref());
 
         let chunk = self.level.get_entity_chunk(chunk_coordinate).await;
-        chunk.data.lock().await.push(nbt);
+        let mut data = chunk.data.lock().await;
+        Self::upsert_entity_nbt(&mut data, nbt);
+        drop(data);
         chunk.mark_dirty(true);
+
+        base_entity.first_loaded_chunk_position.store(Some(Vector3::new(
+            chunk_coordinate.x,
+            0,
+            chunk_coordinate.y,
+        )));
+
 
         self.entities.rcu(|current_entities| {
             let mut new_entities = (**current_entities).clone();
@@ -4197,7 +4203,6 @@ impl World {
         });
     }
 
-    #[allow(clippy::unused_async)]
     pub async fn remove_entity(&self, entity: &dyn EntityBase) {
         let base_entity = entity.get_entity();
         self.spawn_state.load().remove_entity(self, entity);
@@ -4206,6 +4211,30 @@ impl World {
             new_entities.retain(|e| e.get_entity().entity_uuid != base_entity.entity_uuid);
             new_entities
         });
+
+        let uuid = base_entity.entity_uuid.as_u128();
+        let persisted_chunk = base_entity
+            .first_loaded_chunk_position
+            .load()
+            .map(|v| v.to_vec2_i32());
+        let current_chunk = base_entity.block_pos.load().chunk_position();
+        let mut chunks_to_sweep = vec![current_chunk];
+        if let Some(persisted) = persisted_chunk
+            && persisted != current_chunk
+        {
+            chunks_to_sweep.push(persisted);
+        }
+        for chunk_coord in chunks_to_sweep {
+            let chunk = self.level.get_entity_chunk(chunk_coord).await;
+            let mut data = chunk.data.lock().await;
+            let before = data.len();
+            data.retain(|e| Self::entity_nbt_uuid(e) != Some(uuid));
+            let changed = data.len() != before;
+            drop(data);
+            if changed {
+                chunk.mark_dirty(true);
+            }
+        }
 
         let chunk_pos = base_entity.chunk_pos.load();
         self.broadcast_to_chunk_editioned_sync(
@@ -4234,8 +4263,24 @@ impl World {
             new_entities
         });
 
+        for &chunk_coord in chunks {
+            let chunk = self.level.get_entity_chunk(chunk_coord).await;
+            chunk.data.lock().await.clear();
+            chunk.mark_dirty(true);
+        }
         for entity in entities_to_remove {
-            self.save_entity(&entity).await;
+            let base_entity = entity.get_entity();
+            let chunk_coord = base_entity.chunk_pos.load();
+            let mut nbt = NbtCompound::new();
+            entity.write_nbt(&mut nbt).await;
+            let chunk = self.level.get_entity_chunk(chunk_coord).await;
+            let mut data = chunk.data.lock().await;
+            Self::upsert_entity_nbt(&mut data, nbt);
+            drop(data);
+            chunk.mark_dirty(true);
+            base_entity
+                .first_loaded_chunk_position
+                .store(Some(Vector3::new(chunk_coord.x, 0, chunk_coord.y)));
             self.spawn_state.load().remove_entity(self, entity.as_ref());
         }
 
@@ -5292,6 +5337,10 @@ impl World {
         let players = self.players.load();
 
         let recipients = players.iter().filter(|p| {
+            // Skip players whose client hasn't finished loading into the world yet
+            if !p.has_client_loaded() {
+                return false;
+            }
             let center = p.get_entity().chunk_pos.load();
             let view_distance = get_view_distance(p).get() as i32;
 
@@ -5313,6 +5362,9 @@ impl World {
         let mut java_recipients = Vec::new();
 
         let recipients = players.iter().filter(|p| {
+            if !p.has_client_loaded() {
+                return false;
+            }
             let center = p.get_entity().chunk_pos.load();
             let view_distance = get_view_distance(p).get() as i32;
             is_within_view_distance(chunk_pos, center, view_distance)
@@ -5343,6 +5395,9 @@ impl World {
             if except.contains(&p.get_entity().entity_uuid) {
                 return false;
             }
+            if !p.has_client_loaded() {
+                return false;
+            }
             let center = p.get_entity().chunk_pos.load();
             let view_distance = get_view_distance(p).get() as i32;
 
@@ -5363,6 +5418,9 @@ impl World {
         let players = self.players.load();
         let recipients = players.iter().filter(|p| {
             if except.contains(&p.get_entity().entity_uuid) {
+                return false;
+            }
+            if !p.has_client_loaded() {
                 return false;
             }
             let center = p.get_entity().chunk_pos.load();

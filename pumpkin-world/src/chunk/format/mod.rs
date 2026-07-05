@@ -77,8 +77,8 @@ impl Dirtiable for ChunkData {
 }
 
 impl ChunkData {
-    /// Build ChunkData from an already-deserialized ChunkNbt
-    /// Extracted so the Anvil named-palette path can construct a ChunkNbt
+    /// Build `ChunkData` from an already-deserialized `ChunkNbt`
+    /// Extracted so the Anvil named-palette path can construct a `ChunkNbt`
     /// programmatically and reuse all existing chunk-assembly logic
     pub(crate) fn from_chunk_nbt(
         chunk_data: ChunkNbt,
@@ -189,7 +189,7 @@ impl ChunkData {
         if let Ok(anvil_root) = pumpkin_nbt::from_bytes::<anvil::AnvilChunkRoot>(
             std::io::Cursor::new(chunk_data),
         ) {
-            let chunk_nbt = convert_anvil_root_to_chunk_nbt(anvil_root)?;
+            let chunk_nbt = convert_anvil_root_to_chunk_nbt(anvil_root);
             return Self::from_chunk_nbt(chunk_nbt, position);
         }
 
@@ -202,31 +202,6 @@ impl ChunkData {
 
         Self::from_chunk_nbt(chunk_nbt, position)
     }
-
-    pub fn internal_from_bytes(
-        chunk_data: &[u8],
-        position: Vector2<i32>,
-    ) -> Result<Self, ChunkParsingError> {
-        // 1. Try vanilla Anvil / datapack-world format first
-        //    This is a named-root NBT compound
-        if let Ok(anvil_root) = pumpkin_nbt::from_bytes::<anvil::AnvilChunkRoot>(
-            std::io::Cursor::new(chunk_data),
-        ) {
-            let chunk_nbt = convert_anvil_root_to_chunk_nbt(anvil_root)?;
-            return Self::from_chunk_nbt(chunk_nbt, position);
-        }
-
-        // 2. Fallback to Pumpkin's native/internal format
-        //    This is the only place where unnamed-root parsing makes sense
-        let chunk_nbt = pumpkin_nbt::from_bytes_unnamed::<ChunkNbt>(
-            std::io::Cursor::new(chunk_data),
-        )
-        .map_err(|e| ChunkParsingError::ErrorDeserializingChunk(e.to_string()))?;
-
-        Self::from_chunk_nbt(chunk_nbt, position)
-    }
-
-    async fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
 
     fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
         fn extract_light_ref(light: Option<&LightContainer>) -> Option<&[u8]> {
@@ -366,12 +341,10 @@ impl ChunkEntityData {
     }
 }
 
-/// Convert an AnvilChunkRoot (named block/biome palettes) into the internal
-/// ChunkNbt format (numeric palettes).  Unknown blocks default to air
+/// Convert an `AnvilChunkRoot` (named block/biome palettes) into the internal
+/// `ChunkNbt` format (numeric palettes).  Unknown blocks default to air
 /// unknown biomes default to plains (id 0)
-fn convert_anvil_root_to_chunk_nbt(
-    anvil: anvil::AnvilChunkRoot,
-) -> Result<ChunkNbt, ChunkParsingError> {
+fn convert_anvil_root_to_chunk_nbt(anvil: anvil::AnvilChunkRoot) -> ChunkNbt {
     let sections = anvil
         .sections
         .into_iter()
@@ -412,7 +385,7 @@ fn convert_anvil_root_to_chunk_nbt(
         })
         .collect();
 
-    Ok(ChunkNbt {
+    ChunkNbt {
         data_version: anvil.data_version,
         x_pos: anvil.x_pos,
         z_pos: anvil.z_pos,
@@ -424,7 +397,7 @@ fn convert_anvil_root_to_chunk_nbt(
         fluid_ticks: anvil.fluid_ticks,
         block_entities: anvil.block_entities,
         light_correct: anvil.light_correct,
-    })
+    }
 }
 
 fn resolve_anvil_block_entry(name: &str, properties: Option<HashMap<String, String>>) -> BlockStateId {
@@ -435,16 +408,13 @@ fn resolve_anvil_block_entry(name: &str, properties: Option<HashMap<String, Stri
         return Block::AIR.default_state.id;
     };
 
-    match properties {
-        Some(props) => {
-            let codec = BlockStateCodec {
-                name: block,
-                properties: Some(props),
-            };
-            codec.get_state_id()
-        }
-        None => block.default_state.id,
-    }
+    properties.map_or(block.default_state.id, |props| {
+        let codec = BlockStateCodec {
+            name: block,
+            properties: Some(props),
+        };
+        codec.get_state_id()
+    })
 }
 
 fn resolve_anvil_biome_entry(name: &str) -> u8 {

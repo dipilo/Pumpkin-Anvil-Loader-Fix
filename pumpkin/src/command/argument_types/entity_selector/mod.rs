@@ -10,6 +10,7 @@ use crate::entity::EntityBase;
 use crate::entity::player::Player;
 use crate::world::World;
 use pumpkin_data::entity::EntityType;
+use pumpkin_data::tag::Taggable;
 use pumpkin_util::GameMode;
 use pumpkin_util::math::boundingbox::BoundingBox;
 use pumpkin_util::math::bounds::{DoubleBounds, FloatDegreeBounds, IntBounds};
@@ -382,6 +383,11 @@ pub enum EntitySelectorPredicate {
     BoundingBox(BoundingBox),
     /// A predicate to check whether an entity is within a specified range from some position.
     Distance(DoubleBounds, Vector3<f64>),
+    /// A predicate to check the entity's type (`type=`). The `bool` inverts the match (`type=!`).
+    EntityType(&'static EntityType, bool),
+    /// A predicate to check whether the entity's type is in a type tag (`type=#tag`).
+    /// The `bool` inverts the match (`type=!#tag`).
+    EntityTypeTag(String, bool),
 
     /// Used to combine sub-predicates.
     AllOf(Vec<Self>),
@@ -436,6 +442,14 @@ impl EntitySelectorPredicate {
                 .intersects(bounding_box),
             Self::Distance(bounds, pos) => {
                 bounds.matches_square(entity.get_entity().pos.load().squared_distance_to_vec(pos))
+            }
+            Self::EntityType(entity_type, invert) => {
+                (entity.get_entity().entity_type.resource_name == entity_type.resource_name)
+                    ^ invert
+            }
+            Self::EntityTypeTag(tag, invert) => {
+                let matches = entity.get_entity().entity_type.is_tagged_with(tag) == Some(true);
+                matches ^ invert
             }
             Self::AllOf(predicates) => predicates.iter().all(|predicate| predicate.test(entity)),
         }

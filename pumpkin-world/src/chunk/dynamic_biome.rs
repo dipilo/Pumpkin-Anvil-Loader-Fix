@@ -42,6 +42,7 @@ pub struct DynamicBiomeEntry {
 }
 
 impl DynamicBiomeRegistry {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             name_to_id: HashMap::new(),
@@ -65,6 +66,7 @@ impl DynamicBiomeRegistry {
         self.definitions = definitions;
     }
 
+    #[must_use]
     pub fn lookup(&self, name: &str) -> Option<u8> {
         self.name_to_id.get(name).copied()
     }
@@ -88,14 +90,22 @@ impl DynamicBiomeRegistry {
         self.next_id += 1;
 
         // Build biome NBT data for the client registry
-        let (data, gen_biome, source) = match self.definitions.get(name) {
-            Some(def) => (
-                def.network_nbt.clone(),
-                pick_generation_biome(name, Some(def)),
-                "datapack",
-            ),
-            None => (build_biome_nbt(name), pick_generation_biome(name, None), "heuristic"),
-        };
+        let (data, gen_biome, source) = self.definitions.get(name).map_or_else(
+            || {
+                (
+                    build_biome_nbt(name),
+                    pick_generation_biome(name, None),
+                    "heuristic",
+                )
+            },
+            |def| {
+                (
+                    def.network_nbt.clone(),
+                    pick_generation_biome(name, Some(def)),
+                    "datapack",
+                )
+            },
+        );
 
         info!(
             "Registered dynamic biome '{name}' -> internal ID {id} ({source}, \
@@ -127,6 +137,7 @@ impl DynamicBiomeRegistry {
 
     /// Get all registered dynamic biome entries as protocol registry entries
     /// for the client configuration phase
+    #[must_use]
     pub fn get_registry_entries(&self) -> Vec<(ResourceLocation, Box<[u8]>)> {
         let mut entries: Vec<(u8, &DynamicBiomeEntry)> =
             self.id_to_entry.iter().map(|(&id, entry)| (id, entry)).collect();
@@ -138,16 +149,19 @@ impl DynamicBiomeRegistry {
     }
 
     /// Returns true if any dynamic biomes have been registered
+    #[must_use]
     pub fn has_entries(&self) -> bool {
         !self.name_to_id.is_empty()
     }
 
     /// Get the count of registered dynamic biomes
+    #[must_use]
     pub fn len(&self) -> usize {
         self.name_to_id.len()
     }
 
     /// Returns true if no dynamic biomes are registered
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.name_to_id.is_empty()
     }
@@ -319,25 +333,25 @@ fn build_biome_nbt(name: &str) -> Box<[u8]> {
 
     let (has_precipitation, temperature, downfall) =
         if has(&["desert", "sands", "oasis", "badlands", "mesa"]) {
-            (false, 2.0_f32, 0.0_f32)
+            (false, 2.0f32, 0.0f32)
         } else if has(&["savanna", "shrubland", "steppe", "brushland"]) {
-            (false, 1.2_f32, 0.0_f32)
+            (false, 1.2f32, 0.0f32)
         } else if has(&["jungle", "tropical", "rainforest", "kelp"]) {
-            (true, 0.95_f32, 0.9_f32)
+            (true, 0.95f32, 0.9f32)
         } else if has(&["swamp", "bog", "marsh", "wetland"]) {
-            (true, 0.8_f32, 0.9_f32)
+            (true, 0.8f32, 0.9f32)
         } else if has(&["snow", "frozen", "ice", "glacier", "tundra", "siberian"]) {
-            (true, -0.5_f32, 0.4_f32)
+            (true, -0.5f32, 0.4f32)
         } else if has(&["mountain", "peak", "cliff", "highland", "canyon", "yosemite"]) {
-            (true, 0.2_f32, 0.3_f32)
+            (true, 0.2f32, 0.3f32)
         } else if has(&["ocean", "sea"]) {
-            (true, 0.5_f32, 0.5_f32)
+            (true, 0.5f32, 0.5f32)
         } else if has(&["beach", "shore", "cave", "underground"]) {
-            (true, 0.8_f32, 0.4_f32)
+            (true, 0.8f32, 0.4f32)
         } else if has(&["inferno", "volcanic", "crater"]) {
-            (false, 2.0_f32, 0.0_f32)
+            (false, 2.0f32, 0.0f32)
         } else {
-            (true, 0.8_f32, 0.4_f32)
+            (true, 0.8f32, 0.4f32)
         };
 
     // (sky_color, fog_color, water_fog_color, water_color, foliage_color, grass_color)
@@ -401,8 +415,8 @@ fn build_biome_nbt(name: &str) -> Box<[u8]> {
             warn!("Failed to serialize biome NBT for {name}: {e}. Using minimal fallback.");
             let fallback = serde_json::json!({
                 "has_precipitation": true,
-                "temperature": 0.8_f32,
-                "downfall": 0.4_f32,
+                "temperature": 0.8f32,
+                "downfall": 0.4f32,
                 "attributes": { "minecraft:visual/sky_color": 0x78_A7_FF },
                 "effects": { "water_color": 0x3F_76_E4 },
             });
@@ -673,6 +687,7 @@ mod tests {
     /// `BIOME_SCAN_DIR="<path to .../region>" cargo test -p pumpkin-world -- --ignored --nocapture times_region_scan`
     #[test]
     #[ignore = "requires a local world; manual benchmark"]
+    #[allow(clippy::print_stderr)]
     fn times_region_scan() {
         let dir = std::env::var("BIOME_SCAN_DIR").unwrap_or_else(|_| {
             r"C:\Users\sgibe\AppData\Roaming\Modularium\Minecraft\packs\26.2\saves\26_2\dimensions\minecraft\overworld\region".to_string()

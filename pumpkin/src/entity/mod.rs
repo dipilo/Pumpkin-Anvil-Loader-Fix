@@ -2716,6 +2716,10 @@ impl Entity {
         let world = self.world.load();
         let chunk_pos = self.chunk_pos.load();
         for player in world.players.load().iter() {
+            // Skip clients still loading into the world (null ClientLevel)
+            if !player.has_client_loaded() {
+                continue;
+            }
             if let ClientPlatform::Java(client) = player.client.as_ref() {
                 // Apply Chebyshev distance check
                 let center = player.get_entity().chunk_pos.load();
@@ -3323,7 +3327,12 @@ impl NBTStorage for Entity {
             let pos = Vector3::new(x, y, z);
             self.set_pos(pos);
             self.last_sent_pos.store(pos);
-            self.first_loaded_chunk_position.store(Some(pos.to_i32()));
+            let block = pos.to_i32();
+            self.first_loaded_chunk_position.store(Some(Vector3::new(
+                block.x.div_euclid(16),
+                0,
+                block.z.div_euclid(16),
+            )));
             let velocity = nbt.get_list("Motion").unwrap();
             let x = velocity[0].extract_double().unwrap_or(0.0);
             let y = velocity[1].extract_double().unwrap_or(0.0);

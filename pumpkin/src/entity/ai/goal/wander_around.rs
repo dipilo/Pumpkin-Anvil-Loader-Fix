@@ -1,7 +1,14 @@
 use super::{Controls, Goal, GoalFuture, to_goal_ticks};
-use crate::entity::{ai::pathfinder::NavigatorGoal, mob::Mob};
+use crate::entity::{
+    ai::{pathfinder::NavigatorGoal, pathfinder::pathfinding_context::PathfindingContext},
+    mob::Mob,
+};
 use pumpkin_util::math::vector3::Vector3;
 use rand::RngExt;
+
+const HORIZONTAL_RANGE: i32 = 10;
+const VERTICAL_RANGE: i32 = 7;
+const MAX_CANDIDATES: usize = 10;
 
 pub struct WanderAroundGoal {
     goal_control: Controls,
@@ -21,19 +28,32 @@ impl WanderAroundGoal {
         }
     }
 
-    fn find_wander_target(mob: &dyn Mob) -> Vector3<f64> {
+    fn find_wander_target(mob: &dyn Mob) -> Option<Vector3<f64>> {
         let entity = &mob.get_mob_entity().living_entity.entity;
-        let pos = entity.pos.load();
+        let origin = entity.pos.load().to_i32();
+        let world = entity.world.load_full();
+        let mut context = PathfindingContext::new(origin, world);
         let mut rng = mob.get_random();
 
-        let horizontal_range = 10.0;
-        let vertical_range = 7.0;
+        for _ in 0..MAX_CANDIDATES {
+            let dx = rng.random_range(-HORIZONTAL_RANGE..=HORIZONTAL_RANGE);
+            let dy = rng.random_range(-VERTICAL_RANGE..=VERTICAL_RANGE);
+            let dz = rng.random_range(-HORIZONTAL_RANGE..=HORIZONTAL_RANGE);
+            let candidate = Vector3::new(origin.x + dx, origin.y + dy, origin.z + dz);
 
-        let dx = rng.random_range(-horizontal_range..=horizontal_range);
-        let dy = rng.random_range(-vertical_range..=vertical_range);
-        let dz = rng.random_range(-horizontal_range..=horizontal_range);
+            let path_type = context.get_land_node_type(candidate);
+            if path_type.get_malus() != 0.0 {
+                continue;
+            }
 
-        Vector3::new(pos.x + dx, pos.y + dy, pos.z + dz)
+            return Some(Vector3::new(
+                f64::from(candidate.x) + 0.5,
+                f64::from(candidate.y),
+                f64::from(candidate.z) + 0.5,
+            ));
+        }
+
+        None
     }
 }
 
@@ -44,8 +64,9 @@ impl Goal for WanderAroundGoal {
                 return false;
             }
 
-            self.target = Some(Self::find_wander_target(mob));
-            true
+            let target = Self::find_wander_target(mob);
+            self.target = target;
+            self.target.is_some()
         })
     }
 

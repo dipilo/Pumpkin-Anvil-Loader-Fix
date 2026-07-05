@@ -29,7 +29,7 @@ pub enum Category {
 
 impl Category {
     /// Every category Phase 0 indexes
-    pub const ALL: &'static [Category] = &[
+    pub const ALL: &'static [Self] = &[
         Self::NoiseSettings,
         Self::DensityFunction,
         Self::Noise,
@@ -47,6 +47,7 @@ impl Category {
     }
 
     /// Human-readable label for logging
+    #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::NoiseSettings => "noise_settings",
@@ -171,9 +172,8 @@ fn scan_zip(path: &Path, out: &mut RawWorldgen) {
 /// Scan an unpacked datapack folder for worldgen JSON
 fn scan_folder(root: &Path, out: &mut RawWorldgen) {
     let data_dir = root.join("data");
-    let namespaces = match std::fs::read_dir(&data_dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(namespaces) = std::fs::read_dir(&data_dir) else {
+        return;
     };
     for ns_entry in namespaces.flatten() {
         let ns_path = ns_entry.path();
@@ -199,9 +199,8 @@ fn scan_folder(root: &Path, out: &mut RawWorldgen) {
             let Some((category, id)) = classify(&rel) else {
                 continue;
             };
-            let mut contents = String::new();
-            match File::open(&file).and_then(|mut f| f.read_to_string(&mut contents)) {
-                Ok(_) => out.insert(category, id, contents),
+            match std::fs::read_to_string(&file) {
+                Ok(contents) => out.insert(category, id, contents),
                 Err(e) => debug!("Failed to read worldgen file {}: {e}", file.display()),
             }
         }
@@ -210,9 +209,8 @@ fn scan_folder(root: &Path, out: &mut RawWorldgen) {
 
 /// Recursively collect `.json` files under `dir`
 fn collect_json_files(dir: &Path, files: &mut Vec<PathBuf>) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
     for entry in entries.flatten() {
         let path = entry.path();

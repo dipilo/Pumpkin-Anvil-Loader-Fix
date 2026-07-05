@@ -281,8 +281,29 @@ impl JavaClient {
         pos.clamp(-2.0E7, 2.0E7)
     }
 
-    pub fn handle_player_loaded(player: &Player) {
+    pub fn handle_player_loaded(player: &Arc<Player>) {
         player.set_client_loaded(true);
+
+        // Tell the client its op/permission level
+        player.send_permission_lvl_update();
+
+        let player = player.clone();
+        tokio::spawn(async move {
+            let world = player.world().clone();
+            let center = player.get_entity().chunk_pos.load();
+            let view_distance = crate::world::chunker::get_view_distance(&player).get() as i32;
+            let entities = world.entities.load();
+            for entity in entities.iter() {
+                if entity.get_entity().entity_id == player.entity_id() {
+                    continue;
+                }
+                let epos = entity.get_entity().chunk_pos.load();
+                if crate::world::chunker::is_within_view_distance(epos, center, view_distance) {
+                    player.client.try_enqueue_spawn_packet(entity);
+                    entity.init_data_tracker().await;
+                }
+            }
+        });
     }
 
     /// Returns whether syncing the position was needed

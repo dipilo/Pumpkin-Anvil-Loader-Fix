@@ -333,14 +333,17 @@ impl Navigator {
 
         if self.current_path.is_none() {
             entity.movement_input.store(Vector3::new(0.0, 0.0, 0.0));
-            self.current_goal = Some(goal);
+            self.is_idle.store(true, Ordering::Relaxed);
+            self.current_goal = None;
             return;
         }
 
         if let Some(path) = &mut self.current_path {
             if path.is_done() || !path.is_valid() {
                 entity.movement_input.store(Vector3::new(0.0, 0.0, 0.0));
-                self.current_goal = Some(goal);
+                self.is_idle.store(true, Ordering::Relaxed);
+                self.current_goal = None;
+                self.current_path = None;
                 return;
             }
 

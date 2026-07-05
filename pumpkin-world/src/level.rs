@@ -125,6 +125,7 @@ pub struct LevelFolder {
 
 impl Level {
     #[must_use]
+    #[allow(clippy::too_many_lines, clippy::items_after_statements)]
     pub fn from_root_folder(
         level_config: &LevelConfig,
         root_folder: PathBuf,
@@ -143,16 +144,13 @@ impl Level {
                 let legacy = root_folder.join("region");
                 if legacy.is_dir() {
                     // Check if there are actually .mca files here
-                    let has_mca = std::fs::read_dir(&legacy)
-                        .map(|mut entries| {
-                            entries.any(|e| {
-                                e.map(|entry| {
-                                    entry.file_name().to_string_lossy().ends_with(".mca")
-                                })
-                                .unwrap_or(false)
+                    let has_mca = std::fs::read_dir(&legacy).is_ok_and(|mut entries| {
+                        entries.any(|e| {
+                            e.is_ok_and(|entry| {
+                                entry.file_name().to_string_lossy().ends_with(".mca")
                             })
                         })
-                        .unwrap_or(false);
+                    });
                     if has_mca {
                         tracing::info!("Detected legacy pre-26.1 world layout");
                     }
@@ -169,14 +167,11 @@ impl Level {
 
         // Auto-detect existing world formats
         fn has_extension(folder: &PathBuf, ext: &str) -> bool {
-            std::fs::read_dir(folder)
-                .map(|mut entries| {
-                    entries.any(|e| {
-                        e.map(|entry| entry.file_name().to_string_lossy().ends_with(ext))
-                            .unwrap_or(false)
-                    })
+            std::fs::read_dir(folder).is_ok_and(|mut entries| {
+                entries.any(|e| {
+                    e.is_ok_and(|entry| entry.file_name().to_string_lossy().ends_with(ext))
                 })
-                .unwrap_or(false)
+            })
         }
 
         let chunk_config = if has_extension(&region_folder, ".mca") {
@@ -616,9 +611,6 @@ impl Level {
             .map(|entry| *entry.key())
             .collect();
 
-        if !entity_chunks_to_remove.is_empty() {
-            self.clean_entity_chunks(&entity_chunks_to_remove);
-        }
 
         // if the difference is too big, we can shrink the loaded chunks
         // (1024 chunks is the equivalent to a 32x32 chunks area)

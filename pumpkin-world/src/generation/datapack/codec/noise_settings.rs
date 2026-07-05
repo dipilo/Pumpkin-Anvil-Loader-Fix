@@ -59,7 +59,8 @@ pub struct NoiseRouter {
 
 impl NoiseRouter {
     /// Every named router entry, for uniform traversal (coverage, flattening)
-    pub fn entries(&self) -> [(&'static str, &DensityFunction); 15] {
+    #[must_use]
+    pub const fn entries(&self) -> [(&'static str, &DensityFunction); 15] {
         [
             ("barrier", &self.barrier),
             ("fluid_level_floodedness", &self.fluid_level_floodedness),

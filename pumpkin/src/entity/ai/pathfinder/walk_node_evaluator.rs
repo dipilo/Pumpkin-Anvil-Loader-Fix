@@ -392,7 +392,14 @@ impl NodeEvaluator for WalkNodeEvaluator {
         }
 
         let above_pos = Vector3::new(block_x, y + 1, block_z);
-        self.get_start_node(above_pos).await
+        if let Some(node) = self.get_start_node(above_pos).await {
+            return Some(node);
+        }
+        let mut node = self.base.get_node(start_pos.as_blockpos());
+        let path_type = self.get_cached_path_type(start_pos).await;
+        node.path_type = path_type;
+        node.cost_malus = self.get_mob_penalty(path_type);
+        Some(node)
     }
 
     fn get_target(&mut self, pos: BlockPos) -> Target {

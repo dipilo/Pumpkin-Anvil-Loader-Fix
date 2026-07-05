@@ -123,7 +123,7 @@ pub(crate) struct AnvilChunkSection {
     pub y: i8,
 }
 
-/// Mirrors ChunkNbt exactly, except `sections` uses AnvilChunkSection
+/// Mirrors `ChunkNbt` exactly, except `sections` uses `AnvilChunkSection`
 /// so palettes are read as named compounds/strings instead of numeric IDs
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]

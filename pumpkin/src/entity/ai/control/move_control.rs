@@ -98,9 +98,11 @@ impl MoveControlTrait for MoveControl {
                 self.operation = Operation::Wait;
             }
         } else {
-            living_entity
-                .movement_input
-                .store(Vector3::new(0.0, 0.0, 0.0));
+            if mob_entity.navigator.lock().unwrap().is_idle() {
+                living_entity
+                    .movement_input
+                    .store(Vector3::new(0.0, 0.0, 0.0));
+            }
         }
     }
 }

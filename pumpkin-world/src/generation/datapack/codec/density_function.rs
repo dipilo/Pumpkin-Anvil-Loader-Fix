@@ -147,12 +147,13 @@ impl DensityFunction {
                 .as_f64()
                 .map(DensityFunction::Constant)
                 .ok_or_else(|| "non-finite density-function constant".to_string()),
-            Value::String(s) => Ok(DensityFunction::Reference(s)),
+            Value::String(s) => Ok(Self::Reference(s)),
             Value::Object(_) => Self::from_object(value),
             other => Err(format!("invalid density function JSON: {other}")),
         }
     }
 
+    #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
     fn from_object(value: Value) -> Result<Self, String> {
         let kind = value
             .get("type")
@@ -162,12 +163,12 @@ impl DensityFunction {
 
         // Helpers that pull typed argument shapes out of the object
         // `type` is an extra field the argument structs ignore
-        let field = |name: &str| -> Result<DensityFunction, String> {
+        let field = |name: &str| -> Result<Self, String> {
             value
                 .get(name)
                 .cloned()
                 .ok_or_else(|| format!("`{kind}` missing `{name}`"))
-                .and_then(DensityFunction::from_value)
+                .and_then(Self::from_value)
         };
         let noise = |name: &str| -> Result<NoiseRef, String> {
             value
@@ -261,16 +262,16 @@ impl DensityFunction {
             "minecraft:blend_offset" => InlineFunction::BlendOffset,
             "minecraft:beardifier" => InlineFunction::Beardifier,
             // `old_blended_noise` and any future/unknown type: keep raw, don't fail
-            _ => return Ok(DensityFunction::Unknown { kind }),
+            _ => return Ok(Self::Unknown { kind }),
         };
-        Ok(DensityFunction::Inline(Box::new(inline)))
+        Ok(Self::Inline(Box::new(inline)))
     }
 
     /// The `type` string if this is an unmodeled node, for coverage reporting
     #[must_use]
     pub fn unknown_kind(&self) -> Option<&str> {
         match self {
-            DensityFunction::Unknown { kind } => Some(kind),
+            Self::Unknown { kind } => Some(kind),
             _ => None,
         }
     }
