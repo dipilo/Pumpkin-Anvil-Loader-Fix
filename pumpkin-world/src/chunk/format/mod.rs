@@ -203,7 +203,6 @@ impl ChunkData {
         Self::from_chunk_nbt(chunk_nbt, position)
     }
 
-<<<<<<< HEAD
     pub fn internal_from_bytes(
         chunk_data: &[u8],
         position: Vector2<i32>,
@@ -228,7 +227,7 @@ impl ChunkData {
     }
 
     async fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
-=======
+
     fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
         fn extract_light_ref(light: Option<&LightContainer>) -> Option<&[u8]> {
             match light {
@@ -237,7 +236,6 @@ impl ChunkData {
             }
         }
 
->>>>>>> 3aea5ee720671c9a2a654595220cd6eb909f4fde
         let is_light_correct = self
             .light_populated
             .load(std::sync::atomic::Ordering::Relaxed);
