@@ -154,6 +154,12 @@ impl DynamicBiomeRegistry {
         !self.name_to_id.is_empty()
     }
 
+    /// Names of all registered dynamic  biomes
+    #[must_use]
+    pub fn names(&self) -> Vec<String> {
+        self.name_to_id.keys().cloned().collect()
+    }
+
     /// Get the count of registered dynamic biomes
     #[must_use]
     pub fn len(&self) -> usize {

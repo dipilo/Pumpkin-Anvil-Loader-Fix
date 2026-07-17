@@ -20,11 +20,10 @@ use crate::world_info::{
     },
 };
 
-use super::{ExternalWorldGenSettings, LevelData, WorldGenSettings, WorldInfoError, WorldInfoReader, WorldInfoWriter};
+use super::{LevelData, WorldInfoError, WorldInfoReader, WorldInfoWriter};
 
 pub const LEVEL_DAT_FILE_NAME: &str = "level.dat";
 pub const LEVEL_DAT_BACKUP_FILE_NAME: &str = "level.dat_old";
-pub const WORLD_GEN_SETTINGS_FILE_NAME: &str = "data/minecraft/world_gen_settings.dat";
 
 pub struct AnvilLevelInfo;
 
@@ -86,23 +85,6 @@ fn check_file_level_version(raw_nbt: &[u8]) -> Result<(), WorldInfoError> {
     }
 }
 
-fn read_world_gen_settings(level_folder: &Path) ->
-Result<Option<ExternalWorldGenSettings>, WorldInfoError> {
-    let path = level_folder.join(WORLD_GEN_SETTINGS_FILE_NAME);
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let file = File::open(path)?;
-    let mut buf = Vec::new();
-    GzDecoder::new(file).read_to_end(&mut buf)?;
-
-    let settings: ExternalWorldGenSettings = pumpkin_nbt::from_bytes(Cursor::new(buf))
-        .map_err(|e| WorldInfoError::DeserializationError(e.to_string()))?;
-    
-    Ok(Some(settings))
-}
-
 impl WorldInfoReader for AnvilLevelInfo {
     fn read_world_info(&self, level_folder: &Path) -> Result<LevelData, WorldInfoError> {
         let path = level_folder.join(LEVEL_DAT_FILE_NAME);
@@ -113,33 +95,24 @@ impl WorldInfoReader for AnvilLevelInfo {
 
         check_file_data_version(&buf)?;
         check_file_level_version(&buf)?;
-        let mut mut info = pumpkin_nbt::from_bytes::<LevelDat>(Cursor::new(buf))
+        let mut info = pumpkin_nbt::from_bytes::<LevelDat>(Cursor::new(buf))
             .map_err(|e| WorldInfoError::DeserializationError(e.to_string()))?;
 
-        // Minecraft 26.1+ moved dimensions out of level.dat into a separate file.
-        //    Read dimensions from external file and merge.
-        let has_external_dimensions = info.data.world_gen_settings.is_none()
-            || info.data.world_gen_settings.as_ref().is_some_and(|wgs| wgs.dimensions.is_empty());
-
-        if has_external_dimensions
-            && let Some(external) = read_world_gen_settings(level_folder)? {
-                match &mut info.data.world_gen_settings {
-                    Some(wgs) => {
-                        // 26.1+: merge external dimensions into partial level.dat settings
-                        wgs.dimensions = external.data.dimensions;
-                    }
-                    None => {
-                        // Edge case: level.dat has no WorldGenSettings at all,
-                        // but external file exists. Construct minimal settings.
-                        info.data.world_gen_settings = Some(WorldGenSettings {
-                            seed: 0, // fallback; server/mod.rs will override with basic_config.seed
-                            bonus_chest: false,
-                            generate_features: true,
-                            dimensions: external.data.dimensions,
-                        });
-                    }
-                }
+        // Minecraft 26.1+ persists world-gen settings
+        let needs_external = info.data.world_gen_settings.is_none()
+            || info
+                .data
+                .world_gen_settings
+                .as_ref()
+                .is_some_and(|wgs| wgs.dimensions.is_empty());
+        if needs_external
+            && let Some(external) = read_world_gen_settings(level_folder)
+        {
+            match info.data.world_gen_settings.as_mut() {
+                Some(wgs) => wgs.dimensions = external.dimensions,
+                None => info.data.world_gen_settings = Some(external),
             }
+        }
 
         // game_rules.dat – prefer the new file; fall back to level.dat values
         if minecraft_data_dir(level_folder)
@@ -147,11 +120,6 @@ impl WorldInfoReader for AnvilLevelInfo {
             .exists()
         {
             info.data.game_rules = read_game_rules(level_folder);
-        }
-
-        // world_gen_settings.dat
-        if let Some(wgs) = read_world_gen_settings(level_folder) {
-            info.data.world_gen_settings = wgs;
         }
 
         // world_clocks.dat – read the overworld day_time
@@ -213,10 +181,10 @@ impl WorldInfoWriter for AnvilLevelInfo {
         }
 
         // world_gen_settings.dat
-        if let Err(e) =
-            write_world_gen_settings(level_folder, &info.world_gen_settings, data_version)
-        {
-            error!("Failed to write world_gen_settings.dat: {e}");
+        if let Some(wgs) = &info.world_gen_settings {
+            if let Err(e) = write_world_gen_settings(level_folder, wgs) {
+                error!("Failed to write world_gen_settings.dat: {e}");
+            }
         }
 
         // world_clocks.dat – persist the overworld day_time; preserve other
@@ -411,7 +379,7 @@ mod test {
 
         let mut expected = (*LEVEL_DAT).clone();
         expected.data.game_rules = GameRuleRegistry::default();
-        expected.data.world_gen_settings = WorldGenSettings::default();
+        expected.data.world_gen_settings = None;
         expected.data.day_time = 0;
         expected.data.clear_weather_time = 0;
 

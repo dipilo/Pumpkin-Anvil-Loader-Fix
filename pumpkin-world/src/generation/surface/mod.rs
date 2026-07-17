@@ -38,6 +38,7 @@ pub struct MaterialRuleContext<'a> {
     pub block_pos_y: i32,
     pub block_pos_z: i32,
     pub biome: &'a Biome,
+    pub biome_id: u8,
     pub run_depth: i32,
     pub secondary_depth: f64,
     packed_chunk_pos: i64,
@@ -82,6 +83,7 @@ impl<'a> MaterialRuleContext<'a> {
             block_pos_y: 0,
             block_pos_z: 0,
             biome: &Biome::PLAINS,
+            biome_id: Biome::PLAINS.id,
             run_depth: 0,
             secondary_depth: 0.0,
             surface_noise,
@@ -296,8 +298,9 @@ pub fn estimate_surface_height(
 pub struct BiomeMaterialCondition;
 
 impl BiomeMaterialCondition {
-    pub fn test(biome_is: &[&'static Biome], context: &MaterialRuleContext) -> bool {
-        biome_is.contains(&context.biome)
+    pub fn test(biome_is: &[u8], context: &MaterialRuleContext) -> bool {
+        // Match by runtime id
+        biome_is.contains(&context.biome_id)
     }
 }
 

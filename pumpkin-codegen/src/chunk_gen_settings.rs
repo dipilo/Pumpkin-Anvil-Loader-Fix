@@ -303,10 +303,11 @@ impl ToTokens for MaterialConditionStruct {
                 let biomes = biome_is
                     .iter()
                     .map(|b| b.strip_prefix("minecraft:").unwrap_or(b).to_uppercase());
+                // Emit biome *ids* (`Biome::id`), not `&Biome`
                 let biome_refs: Vec<TokenStream> = biomes
                     .map(|b| {
                         let ident = format_ident!("{}", b);
-                        quote!(&crate::biome::Biome::#ident)
+                        quote!(crate::biome::Biome::#ident.id)
                     })
                     .collect();
 
@@ -576,7 +577,8 @@ pub fn build() -> TokenStream {
 
 
         pub struct BiomeMaterialCondition {
-            pub biome_is: &'static [&'static Biome],
+            /// Runtime biome ids (`Biome::id`)
+            pub biome_is: &'static [u8],
         }
 
         pub struct NoiseThresholdMaterialCondition {

@@ -84,17 +84,6 @@ impl ChunkData {
         chunk_data: ChunkNbt,
         position: Vector2<i32>,
     ) -> Result<Self, ChunkParsingError> {
-        let is_named = chunk_data.len() >= 3
-            && chunk_data[0] == 0x0a
-            && chunk_data[1] == 0x00
-            && chunk_data[2] == 0x00;
-        let chunk_data = if is_named {
-            pumpkin_nbt::from_bytes::<ChunkNbt>(std::io::Cursor::new(chunk_data))
-        } else {
-            pumpkin_nbt::from_bytes_unnamed::<ChunkNbt>(std::io::Cursor::new(chunk_data))
-        }
-        .map_err(|e| ChunkParsingError::ErrorDeserializingChunk(e.to_string()))?;
-
         if chunk_data.x_pos != position.x || chunk_data.z_pos != position.y {
             return Err(ChunkParsingError::ErrorDeserializingChunk(format!(
                 "Expected data for chunk {},{} but got it for {},{}!",

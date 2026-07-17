@@ -3837,8 +3837,8 @@ impl TrackedData {
         v1_21_7: 255u8,
         v1_21_9: 255u8,
         v1_21_11: 255u8,
-        v26_1: 21u8,
-        v26_2: 21u8,
+        v26_1: 23u8,
+        v26_2: 23u8,
     };
     pub const VEX_FLAGS: TrackedId = TrackedId {
         v1_21: 16u8,

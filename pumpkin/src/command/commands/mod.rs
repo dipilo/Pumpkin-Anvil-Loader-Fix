@@ -16,9 +16,11 @@ mod clear;
 mod clone;
 mod damage;
 mod data;
+mod datapack;
 pub mod defaultgamemode;
 mod deop;
 mod dialog;
+mod locate;
 mod difficulty;
 mod effect;
 mod enchant;
@@ -105,6 +107,8 @@ pub async fn default_dispatcher(
     dispatcher.register(effect::init_command_tree(), "minecraft:command.effect");
     dispatcher.register(teleport::init_command_tree(), "minecraft:command.teleport");
     dispatcher.register(time::init_command_tree(), "minecraft:command.time");
+    dispatcher.register(datapack::init_command_tree(), "minecraft:command.datapack");
+    dispatcher.register(locate::init_command_tree(), "minecraft:command.locate");
     dispatcher.register(give::init_command_tree(), "minecraft:command.give");
     dispatcher.register(item::init_command_tree(), "minecraft:command.item");
     dispatcher.register(enchant::init_command_tree(), "minecraft:command.enchant");
@@ -276,6 +280,20 @@ fn register_level_2_permissions(registry: &mut PermissionRegistry) {
         .register_permission(Permission::new(
             "minecraft:command.time",
             "Changes or queries the world's game time",
+            PermissionDefault::Op(PermissionLvl::Two),
+        ))
+        .expect("Permission already registered");
+    registry
+        .register_permission(Permission::new(
+            "minecraft:command.datapack",
+            "Lists the world's datapacks and world-generation status",
+            PermissionDefault::Op(PermissionLvl::Two),
+        ))
+        .expect("Permission already registered");
+    registry
+        .register_permission(Permission::new(
+            "minecraft:command.locate",
+            "Locates the nearest biome",
             PermissionDefault::Op(PermissionLvl::Two),
         ))
         .expect("Permission already registered");

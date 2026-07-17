@@ -1248,6 +1248,61 @@ pub fn build() -> TokenStream {
             pub to_value: f64,
         }
 
+        // `weird_scaled_sampler` rarity mapper (DensityFunctions.CaveScaler):
+        // Tunnels = "type_1" (max ×2.0), Caves = "type_2" (max ×3.0)
+        #[derive(Copy, Clone)]
+        pub enum RarityValueMapper {
+            Tunnels,
+            Caves,
+        }
+
+        impl RarityValueMapper {
+            #[inline]
+            #[must_use]
+            pub const fn max_multiplier(self) -> f64 {
+                match self {
+                    Self::Tunnels => 2.0,
+                    Self::Caves => 3.0,
+                }
+            }
+
+            #[inline]
+            #[must_use]
+            pub const fn scale(self, value: f64) -> f64 {
+                match self {
+                    Self::Tunnels => {
+                        if value < -0.5 {
+                            0.75
+                        } else if value < 0.0 {
+                            1.0
+                        } else if value < 0.5 {
+                            1.5
+                        } else {
+                            2.0
+                        }
+                    }
+                    Self::Caves => {
+                        if value < -0.75 {
+                            0.5
+                        } else if value < -0.5 {
+                            0.75
+                        } else if value < 0.5 {
+                            1.0
+                        } else if value < 0.75 {
+                            2.0
+                        } else {
+                            3.0
+                        }
+                    }
+                }
+            }
+        }
+
+        pub struct WeirdScaledData {
+            pub noise_id: DoublePerlinNoiseParameters,
+            pub mapper: RarityValueMapper,
+        }
+
         #[derive(Copy, Clone)]
         pub enum BinaryOperation {
             Add,
@@ -1395,6 +1450,13 @@ pub fn build() -> TokenStream {
             },
             ShiftB {
                 noise_id: DoublePerlinNoiseParameters,
+            },
+            Shift {
+                noise_id: DoublePerlinNoiseParameters,
+            },
+            WeirdScaledSampler {
+                input_index: usize,
+                data: &'static WeirdScaledData,
             },
             ShiftedNoise {
                 shift_x_index: usize,

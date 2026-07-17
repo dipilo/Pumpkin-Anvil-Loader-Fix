@@ -57,10 +57,6 @@ pub struct LevelData {
     #[serde(default)]
     pub difficulty_locked: bool,
     #[serde(default)]
-    pub game_rules: GameRuleRegistry,
-    #[serde(default)]
-    pub world_gen_settings: Option<WorldGenSettings>,
-    #[serde(default)]
     pub last_played: i64,
     #[serde(default = "default_level_name")]
     pub level_name: String,
@@ -89,7 +85,7 @@ pub struct LevelData {
 
     /// World generation settings – persisted to `data/minecraft/world_gen_settings.dat`.
     #[serde(skip_serializing, default)]
-    pub world_gen_settings: WorldGenSettings,
+    pub world_gen_settings: Option<WorldGenSettings>,
 
     /// In-game time of day (overworld dimension clock).
     /// Persisted to `data/minecraft/world_clocks.dat`.
@@ -149,6 +145,7 @@ const fn default_level_version() -> i32 {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 pub struct WorldGenSettings {
     // the numerical seed of the world
+    #[serde(default)]
     pub seed: i64,
     #[serde(default)]
     pub bonus_chest: bool,
@@ -160,18 +157,6 @@ pub struct WorldGenSettings {
 
 const fn default_generate_features() -> bool {
     true
-}
-
-/// The schema used by the external `data/minecraft/world_gen_settings.dat` (26.1+)
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct ExternalWorldGenSettings {
-    #[serde(rename = "data")]
-    pub data: ExternalWorldGenData,
-}
-
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct ExternalWorldGenData {
-    pub dimensions: Dimensions,
 }
 
 impl Default for WorldGenSettings {
@@ -366,8 +351,6 @@ impl LevelData {
             data_version: MAXIMUM_SUPPORTED_WORLD_DATA_VERSION,
             difficulty: DEFAULT_DIFFICULTY,
             difficulty_locked: false,
-            game_rules: GameRuleRegistry::default(),
-            world_gen_settings: Some(WorldGenSettings::new(seed)),
             last_played: -1,
             level_name: DEFAULT_LEVEL_NAME.to_string(),
             spawn_x: 0,
@@ -380,7 +363,7 @@ impl LevelData {
             map_id: 0,
             // fields now in data/minecraft/*.dat
             game_rules: GameRuleRegistry::default(),
-            world_gen_settings: WorldGenSettings::new(seed),
+            world_gen_settings: Some(WorldGenSettings::new(seed)),
             day_time: 0,
             clear_weather_time: -1,
         }

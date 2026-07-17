@@ -761,6 +761,9 @@ impl ProtoChunk {
         let start_biome_x = biome_coords::from_block(start_block_x);
         let start_biome_z = biome_coords::from_block(start_block_z);
 
+        // Place real datapack biomes when the datapack defines a multi-noise biome source
+        let datapack_biomes = generator.datapack_biome_supplier;
+
         for i in bottom_section..=top_section {
             let start_block_y = section_coords::section_to_block(i);
             let start_biome_y = biome_coords::from_block(start_block_y);
@@ -769,19 +772,29 @@ impl ProtoChunk {
             for x in 0..biomes_per_section {
                 for y in 0..biomes_per_section {
                     for z in 0..biomes_per_section {
-                        let biome = biome_supplier.biome(
-                            start_biome_x + x,
-                            start_biome_y + y,
-                            start_biome_z + z,
-                            multi_noise_sampler,
-                        );
+                        let biome_x = start_biome_x + x;
+                        let biome_y = start_biome_y + y;
+                        let biome_z = start_biome_z + z;
+                        let biome_id = match datapack_biomes {
+                            Some(supplier) => {
+                                let point = multi_noise_sampler
+                                    .sample(biome_x, biome_y, biome_z)
+                                    .convert_to_list();
+                                supplier.biome_id(&point)
+                            }
+                            None => {
+                                biome_supplier
+                                    .biome(biome_x, biome_y, biome_z, multi_noise_sampler)
+                                    .id
+                            }
+                        };
                         let index = self.local_biome_pos_to_biome_index(
                             x,
                             start_biome_y + y - biome_coords::from_block(min_y as i32),
                             z,
                         );
 
-                        self.flat_biome_map[index] = biome.id;
+                        self.flat_biome_map[index] = biome_id;
                     }
                 }
             }
@@ -990,6 +1003,12 @@ impl ProtoChunk {
 
                     if state.id == self.default_block.id {
                         context.biome = self.get_terrain_gen_biome(
+                            context.block_pos_x,
+                            context.block_pos_y,
+                            context.block_pos_z,
+                        );
+                        // Real biome id for datapack surface rules
+                        context.biome_id = self.get_terrain_gen_biome_id(
                             context.block_pos_x,
                             context.block_pos_y,
                             context.block_pos_z,

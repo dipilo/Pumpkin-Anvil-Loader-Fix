@@ -223,13 +223,22 @@ pub struct XoroshiroSplitter {
     hi: u64,
 }
 
+/// The `(lo, hi)` seed halves derived from the MD5 hash of a string key.
+///
+/// This is the same derivation vanilla uses to seed noise parameters from their
+/// registry key, and matches the `lo`/`hi` stored in `DoublePerlinNoiseParameters`.
+#[must_use]
+pub fn md5_to_lo_hi(seed: &str) -> (u64, u64) {
+    let bytes = md5::compute(seed.as_bytes());
+    let lo = u64::from_be_bytes(bytes[0..8].try_into().expect("incorrect length"));
+    let hi = u64::from_be_bytes(bytes[8..16].try_into().expect("incorrect length"));
+    (lo, hi)
+}
+
 impl XoroshiroSplitter {
     #[must_use]
     pub fn split_string(&self, seed: &str) -> Xoroshiro {
-        let bytes = md5::compute(seed.as_bytes());
-        let l = u64::from_be_bytes(bytes[0..8].try_into().expect("incorrect length"));
-        let m = u64::from_be_bytes(bytes[8..16].try_into().expect("incorrect length"));
-
+        let (l, m) = md5_to_lo_hi(seed);
         Xoroshiro::new(l ^ self.lo, m ^ self.hi)
     }
 

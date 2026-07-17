@@ -146,6 +146,30 @@ impl Mob for WolfEntity {
                 )],
                 None,
             );
+            entity.send_meta_data(
+                &[Metadata::new(
+                    TrackedData::VARIANT_ID,
+                    MetaDataType::WOLF_VARIANT,
+                    VarInt(self.variant.load(Ordering::Relaxed) as i32),
+                )],
+                None,
+            );
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pumpkin_data::tracked_data::TrackedData;
+
+    #[test]
+    fn wolf_variant_field_index_is_correct() {
+        assert_eq!(TrackedData::VARIANT_ID.v26_2, 23);
+        assert_eq!(TrackedData::VARIANT_ID.v26_1, 23);
+        assert_ne!(
+            TrackedData::VARIANT_ID.v26_2,
+            TrackedData::COLLAR_COLOR.v26_2,
+            "wolf variant field must not collide with collar color"
+        );
     }
 }

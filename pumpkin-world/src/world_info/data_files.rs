@@ -50,34 +50,6 @@ impl Default for WeatherData {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-pub struct WorldGenSettingsData {
-    #[serde(flatten)]
-    pub settings: WorldGenSettings,
-    #[serde(rename = "DataVersion", default)]
-    pub data_version: i32,
-    #[serde(rename = "bonus_chest", default)]
-    pub bonus_chest: bool,
-    #[serde(rename = "generate_structures", default = "default_true")]
-    pub generate_structures: bool,
-}
-
-const fn default_true() -> bool {
-    true
-}
-
-impl WorldGenSettingsData {
-    #[must_use]
-    pub const fn new(settings: WorldGenSettings, data_version: i32) -> Self {
-        Self {
-            settings,
-            data_version,
-            bonus_chest: false,
-            generate_structures: true,
-        }
-    }
-}
-
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct DimensionClock {
     pub total_ticks: i64,
@@ -163,8 +135,9 @@ pub fn read_world_gen_settings(level_folder: &Path) -> Option<WorldGenSettings> 
         return None;
     }
     match File::open(&path) {
-        Ok(f) => match from_gzip_bytes::<DataFileRoot<WorldGenSettingsData>, _>(f) {
-            Ok(root) => Some(root.data.settings),
+        // `WorldGenSettings` is serialized directly under `data`
+        Ok(f) => match from_gzip_bytes::<DataFileRoot<WorldGenSettings>, _>(f) {
+            Ok(root) => Some(root.data),
             Err(e) => {
                 warn!("Failed to deserialize world_gen_settings.dat: {e}");
                 None
@@ -180,13 +153,13 @@ pub fn read_world_gen_settings(level_folder: &Path) -> Option<WorldGenSettings> 
 pub fn write_world_gen_settings(
     level_folder: &Path,
     settings: &WorldGenSettings,
-    data_version: i32,
 ) -> Result<(), WorldInfoError> {
     let dir = ensure_minecraft_data_dir(level_folder)?;
     let path = dir.join("world_gen_settings.dat");
     let file = File::create(&path)?;
-    let data = WorldGenSettingsData::new(settings.clone(), data_version);
-    let root = DataFileRoot { data };
+    let root = DataFileRoot {
+        data: settings.clone(),
+    };
     to_gzip_bytes(&root, BufWriter::new(file))
         .map_err(|e| WorldInfoError::SerializationError(e.to_string()))
 }

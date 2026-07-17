@@ -1,6 +1,8 @@
 use std::array;
 
-use pumpkin_data::noise_router::{InterpolatedNoiseSamplerData, NoiseData, ShiftedNoiseData};
+use pumpkin_data::noise_router::{
+    InterpolatedNoiseSamplerData, NoiseData, ShiftedNoiseData, WeirdScaledData,
+};
 use pumpkin_util::{
     math::{clamped_lerp, vector3::Vector3},
     noise::perlin::OctavePerlinNoiseSampler,
@@ -108,6 +110,94 @@ impl NoiseFunctionComponentRange for ShiftB {
 impl StaticIndependentChunkNoiseFunctionComponentImpl for ShiftB {
     fn sample(&self, pos: &Vector3<i32>) -> f64 {
         shift_sample_3d(&self.sampler, pos.z as f64, pos.x as f64, 0.0)
+    }
+}
+
+/// `minecraft:shift`
+pub struct Shift {
+    sampler: DoublePerlinNoiseSampler,
+}
+
+impl Shift {
+    pub const fn new(sampler: DoublePerlinNoiseSampler) -> Self {
+        Self { sampler }
+    }
+}
+
+impl NoiseFunctionComponentRange for Shift {
+    #[inline]
+    fn min(&self) -> f64 {
+        -self.max()
+    }
+
+    #[inline]
+    fn max(&self) -> f64 {
+        self.sampler.max_value() * 4.0
+    }
+}
+
+impl StaticIndependentChunkNoiseFunctionComponentImpl for Shift {
+    fn sample(&self, pos: &Vector3<i32>) -> f64 {
+        shift_sample_3d(&self.sampler, pos.x as f64, pos.y as f64, pos.z as f64)
+    }
+}
+
+/// `minecraft:weird_scaled_sampler`
+pub struct WeirdScaledSampler {
+    input_index: usize,
+    sampler: DoublePerlinNoiseSampler,
+    data: &'static WeirdScaledData,
+}
+
+impl WeirdScaledSampler {
+    pub const fn new(
+        input_index: usize,
+        sampler: DoublePerlinNoiseSampler,
+        data: &'static WeirdScaledData,
+    ) -> Self {
+        Self {
+            input_index,
+            sampler,
+            data,
+        }
+    }
+}
+
+impl NoiseFunctionComponentRange for WeirdScaledSampler {
+    #[inline]
+    fn min(&self) -> f64 {
+        0.0
+    }
+
+    #[inline]
+    fn max(&self) -> f64 {
+        self.data.mapper.max_multiplier() * self.sampler.max_value()
+    }
+}
+
+impl StaticChunkNoiseFunctionComponentImpl for WeirdScaledSampler {
+    fn sample(
+        &self,
+        component_stack: &mut [ChunkNoiseFunctionComponent],
+        pos: &Vector3<i32>,
+        sample_options: &ChunkNoiseFunctionSampleOptions,
+    ) -> f64 {
+        let input = ChunkNoiseFunctionComponent::sample_from_stack(
+            &mut component_stack[..=self.input_index],
+            pos,
+            sample_options,
+        );
+        // The rarity mappers never return 0 (min 0.5), so it's okay guys
+        let scale = self.data.mapper.scale(input);
+        scale
+            * self
+                .sampler
+                .sample(
+                    pos.x as f64 / scale,
+                    pos.y as f64 / scale,
+                    pos.z as f64 / scale,
+                )
+                .abs()
     }
 }
 

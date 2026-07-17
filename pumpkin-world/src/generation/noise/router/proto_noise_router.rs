@@ -24,7 +24,10 @@ use super::{
         beardifier::Beardifier,
         math::{Binary, Clamp, Constant, Linear, Unary},
         misc::{ClampedYGradient, EndIsland, IntervalSelect, RangeChoice},
-        noise::{InterpolatedNoiseSampler, Noise, ShiftA, ShiftB, ShiftedNoise},
+        noise::{
+            InterpolatedNoiseSampler, Noise, Shift, ShiftA, ShiftB, ShiftedNoise,
+            WeirdScaledSampler,
+        },
         spline::{Spline, SplineFunction, SplinePoint, SplineValue},
     },
 };
@@ -40,6 +43,7 @@ pub enum IndependentProtoNoiseFunctionComponent {
     Noise(Noise),
     ShiftA(ShiftA),
     ShiftB(ShiftB),
+    Shift(Shift),
     InterpolatedNoise(InterpolatedNoiseSampler),
     ClampedYGradient(ClampedYGradient),
 }
@@ -50,6 +54,7 @@ pub enum DependentProtoNoiseFunctionComponent {
     Unary(Unary),
     Binary(Binary),
     ShiftedNoise(ShiftedNoise),
+    WeirdScaledSampler(WeirdScaledSampler),
     IntervalSelect(IntervalSelect),
     FindTopSurface(FindTopSurface),
     Clamp(Clamp),
@@ -209,6 +214,26 @@ impl ProtoNoiseRouters {
                     );
                     ProtoNoiseFunctionComponent::Independent(
                         IndependentProtoNoiseFunctionComponent::ShiftB(ShiftB::new(sampler)),
+                    )
+                }
+                BaseNoiseFunctionComponent::Shift { noise_id } => {
+                    let sampler = DoublePerlinNoiseBuilder::get_noise_sampler_for_id(
+                        base_random_deriver,
+                        noise_id,
+                    );
+                    ProtoNoiseFunctionComponent::Independent(
+                        IndependentProtoNoiseFunctionComponent::Shift(Shift::new(sampler)),
+                    )
+                }
+                BaseNoiseFunctionComponent::WeirdScaledSampler { input_index, data } => {
+                    let sampler = DoublePerlinNoiseBuilder::get_noise_sampler_for_id(
+                        base_random_deriver,
+                        &data.noise_id,
+                    );
+                    ProtoNoiseFunctionComponent::Dependent(
+                        DependentProtoNoiseFunctionComponent::WeirdScaledSampler(
+                            WeirdScaledSampler::new(*input_index, sampler, data),
+                        ),
                     )
                 }
                 BaseNoiseFunctionComponent::BlendDensity { input_index } => {

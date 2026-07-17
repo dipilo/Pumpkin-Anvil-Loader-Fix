@@ -81,8 +81,82 @@ fn main() {
         format!("{code}\n{pool_code}\n{template_pool_json_code}\n{processor_list_json_code}"),
     )
     .unwrap();
+
+    // Embed the vanilla worldgen registry baseline
+    // Emitted as both an id→JSON lookup and an id list
+    let mut registry_code = String::new();
+    emit_json_registry(
+        &worldgen_dir.join("density_function"),
+        "get_vanilla_density_function_json",
+        "VANILLA_DENSITY_FUNCTION_IDS",
+        &mut registry_code,
+    );
+    emit_json_registry(
+        &worldgen_dir.join("noise"),
+        "get_vanilla_noise_json",
+        "VANILLA_NOISE_IDS",
+        &mut registry_code,
+    );
+    let registry_dest = Path::new(&out_dir).join("vanilla_worldgen_embeddings.rs");
+    fs::write(&registry_dest, registry_code).unwrap();
+
     println!("cargo:rerun-if-changed=assets/structures");
     println!("cargo:rerun-if-changed=assets/worldgen");
+}
+
+/// Emit `pub fn <fn_name>(id) -> Option<&'static str>` plus
+/// `pub const <ids_name>: &[&str]` for every `.json` under `dir` (recursively)
+fn emit_json_registry(dir: &Path, fn_name: &str, ids_name: &str, code: &mut String) {
+    let mut ids = Vec::new();
+    let _ = writeln!(
+        code,
+        "#[allow(clippy::too_many_lines)]\n#[allow(clippy::match_same_arms)]\n#[must_use]\npub fn {fn_name}(id: &str) -> Option<&'static str> {{\n    match id {{"
+    );
+    collect_json_registry(dir, "", code, &mut ids);
+    code.push_str("        _ => None,\n    }\n}\n");
+
+    ids.sort();
+    let _ = writeln!(code, "pub const {ids_name}: &[&str] = &[");
+    for id in ids {
+        let _ = writeln!(code, "    \"minecraft:{id}\",");
+    }
+    code.push_str("];\n");
+}
+
+fn collect_json_registry(dir: &Path, prefix: &str, code: &mut String, ids: &mut Vec<String>) {
+    if !dir.exists() {
+        return;
+    }
+    let mut entries = fs::read_dir(dir)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(std::fs::DirEntry::file_name);
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name().into_string().unwrap();
+        if path.is_dir() {
+            let new_prefix = if prefix.is_empty() {
+                name
+            } else {
+                format!("{prefix}/{name}")
+            };
+            collect_json_registry(&path, &new_prefix, code, ids);
+        } else if let Some(stem) = name.strip_suffix(".json") {
+            let id = if prefix.is_empty() {
+                stem.to_string()
+            } else {
+                format!("{prefix}/{stem}")
+            };
+            let abs_path = path.canonicalize().unwrap();
+            let _ = writeln!(
+                code,
+                "        \"minecraft:{id}\" | \"{id}\" => Some(include_str!(r#\"{abs}\"#)),",
+                abs = abs_path.display()
+            );
+            ids.push(id);
+        }
+    }
 }
 
 fn process_dir(

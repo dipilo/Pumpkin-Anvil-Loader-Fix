@@ -126,6 +126,107 @@ pub struct LevelFolder {
     pub poi_folder: PathBuf,
 }
 
+/// The `file/` prefix `level.dat` uses for on-disk packs
+const DATAPACK_FILE_PREFIX: &str = "file/";
+
+/// A world's effective datapack selection
+#[derive(Debug, Clone, Default)]
+pub struct DatapackSelection {
+    /// Enabled pack ids in priority order
+    pub enabled: Vec<String>,
+    /// Packs present on disk but not enabled
+    pub available: Vec<String>,
+}
+
+/// Pack files physically present in `datapacks_dir`, sorted by name
+fn present_pack_files(datapacks_dir: &std::path::Path) -> Vec<String> {
+    let mut files: Vec<String> = std::fs::read_dir(datapacks_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    e.file_type().is_ok_and(|t| t.is_dir())
+                        || e.path()
+                            .extension()
+                            .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+                })
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    files
+}
+
+/// Apply vanilla's `MinecraftServer.configurePackRepository` selection to a world
+fn compute_selection(
+    data_packs: &crate::world_info::DataPacks,
+    datapacks_dir: &std::path::Path,
+) -> DatapackSelection {
+    let mut enabled = data_packs.enabled.clone();
+    let mut available = Vec::new();
+    for file in present_pack_files(datapacks_dir) {
+        let id = format!("{DATAPACK_FILE_PREFIX}{file}");
+        if enabled.contains(&id) {
+            continue;
+        }
+        if data_packs.disabled.contains(&id) {
+            // Present but the player explicitly disabled it
+            available.push(id);
+        } else {
+            // New pack in the folder; auto-add it
+            enabled.push(id);
+        }
+    }
+    DatapackSelection { enabled, available }
+}
+
+/// Resolve the effective datapack selection for a world
+#[must_use]
+pub fn resolve_datapack_selection(root_folder: &std::path::Path) -> DatapackSelection {
+    use crate::world_info::{DataPacks, WorldInfoReader, anvil::AnvilLevelInfo};
+
+    let datapacks_dir = root_folder.join("datapacks");
+    match AnvilLevelInfo.read_world_info(root_folder) {
+        Ok(level_data) => compute_selection(&level_data.data_packs, &datapacks_dir),
+        Err(_) => compute_selection(
+            &DataPacks {
+                enabled: vec!["vanilla".to_string()],
+                disabled: vec![],
+            },
+            &datapacks_dir,
+        ),
+    }
+}
+
+/// Resolve a world's enabled datapacks to their on-disk paths 
+/// under `<world>/datapacks`, in enabled order
+fn enabled_datapack_sources(
+    root_folder: &std::path::Path,
+    datapacks_dir: &std::path::Path,
+) -> Option<Vec<PathBuf>> {
+    use crate::world_info::{WorldInfoReader, anvil::AnvilLevelInfo};
+
+    let level_data = AnvilLevelInfo.read_world_info(root_folder).ok()?;
+    let selection = compute_selection(&level_data.data_packs, datapacks_dir);
+    let mut sources = Vec::new();
+    for id in &selection.enabled {
+        // Only `file/<name>` entries map to on-disk packs
+        let Some(name) = id.strip_prefix(DATAPACK_FILE_PREFIX) else {
+            continue;
+        };
+        let path = datapacks_dir.join(name);
+        if path.exists() {
+            sources.push(path);
+        }
+    }
+    if sources.is_empty() {
+        None
+    } else {
+        Some(sources)
+    }
+}
+
 impl Level {
     #[must_use]
     #[allow(clippy::too_many_lines, clippy::items_after_statements)]
@@ -170,15 +271,23 @@ impl Level {
             level_config.chunk.clone()
         };
 
-        clear_dynamic_biomes();
-
         // Gather datapack sources
         let mut datapack_sources: Vec<PathBuf> = Vec::new();
         let world_datapacks = root_folder.join("datapacks");
         if world_datapacks.is_dir() {
-            datapack_sources.push(world_datapacks);
+            match enabled_datapack_sources(&root_folder, &world_datapacks) {
+                Some(ordered) => datapack_sources.extend(ordered),
+                // No readable enabled list
+                None => datapack_sources.push(world_datapacks),
+            }
         }
         datapack_sources.extend(level_config.datapack_paths.iter().cloned());
+
+        // Reset the global dynamic-biome registry only when 
+        // THIS load will repopulate it from its own datapacks
+        if !datapack_sources.is_empty() {
+            clear_dynamic_biomes();
+        }
 
         // Fast path
         let registered_from_datapacks = if datapack_sources.is_empty() {
@@ -195,9 +304,10 @@ impl Level {
             registry.has_definitions()
         };
 
-        // index and coverage-report the world's worldgen registries (noise_settings/density_function/…)
+        // index the world's worldgen registries (noise_settings/density_function/…) and install them
         if !datapack_sources.is_empty() {
-            let _worldgen = crate::generation::datapack::WorldgenData::load(&datapack_sources);
+            let worldgen = crate::generation::datapack::WorldgenData::load(&datapack_sources);
+            crate::generation::datapack::set_active_worldgen(worldgen);
         }
 
         // Scan region files if the datapacks didn't provide biome definitions

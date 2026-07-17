@@ -51,6 +51,7 @@ pub enum InlineFunction {
     HalfNegative(DensityFunction),
     QuarterNegative(DensityFunction),
     Squeeze(DensityFunction),
+    Invert(DensityFunction),
     // Binary operators
     Add(DensityFunction, DensityFunction),
     Mul(DensityFunction, DensityFunction),
@@ -91,14 +92,35 @@ pub enum InlineFunction {
         when_in_range: DensityFunction,
         when_out_of_range: DensityFunction,
     },
+    /// Selects one of `functions` by which interval of `thresholds` the `input` value falls into 
+    IntervalSelect {
+        input: DensityFunction,
+        thresholds: Vec<f64>,
+        functions: Vec<DensityFunction>,
+    },
     YClampedGradient {
         from_y: f64,
         to_y: f64,
         from_value: f64,
         to_value: f64,
     },
+    /// Scans downward from `upper_bound` for the highest cell whose `density` is positive
+    FindTopSurface {
+        density: DensityFunction,
+        upper_bound: DensityFunction,
+        lower_bound: i32,
+        cell_height: i32,
+    },
     Constant(f64),
     Spline(SplineRepr),
+    /// The terrain "base 3d noise"
+    OldBlendedNoise {
+        xz_scale: f64,
+        y_scale: f64,
+        xz_factor: f64,
+        y_factor: f64,
+        smear_scale_multiplier: f64,
+    },
     // Context/marker nodes with no arguments
     EndIslands,
     BlendAlpha,
@@ -191,29 +213,31 @@ impl DensityFunction {
                 .ok_or_else(|| format!("`{kind}` missing string `{name}`"))
         };
 
-        let inline = match kind.as_str() {
-            "minecraft:interpolated" => InlineFunction::Interpolated(field("argument")?),
-            "minecraft:flat_cache" => InlineFunction::FlatCache(field("argument")?),
-            "minecraft:cache_2d" => InlineFunction::Cache2d(field("argument")?),
-            "minecraft:cache_once" => InlineFunction::CacheOnce(field("argument")?),
-            "minecraft:cache_all_in_cell" => InlineFunction::CacheAllInCell(field("argument")?),
-            "minecraft:blend_density" => InlineFunction::BlendDensity(field("argument")?),
-            "minecraft:abs" => InlineFunction::Abs(field("argument")?),
-            "minecraft:square" => InlineFunction::Square(field("argument")?),
-            "minecraft:cube" => InlineFunction::Cube(field("argument")?),
-            "minecraft:half_negative" => InlineFunction::HalfNegative(field("argument")?),
-            "minecraft:quarter_negative" => InlineFunction::QuarterNegative(field("argument")?),
-            "minecraft:squeeze" => InlineFunction::Squeeze(field("argument")?),
-            "minecraft:add" => InlineFunction::Add(field("argument1")?, field("argument2")?),
-            "minecraft:mul" => InlineFunction::Mul(field("argument1")?, field("argument2")?),
-            "minecraft:min" => InlineFunction::Min(field("argument1")?, field("argument2")?),
-            "minecraft:max" => InlineFunction::Max(field("argument1")?, field("argument2")?),
-            "minecraft:noise" => InlineFunction::Noise {
+        let kind_key = kind.strip_prefix("minecraft:").unwrap_or(kind.as_str());
+        let inline = match kind_key {
+            "interpolated" => InlineFunction::Interpolated(field("argument")?),
+            "flat_cache" => InlineFunction::FlatCache(field("argument")?),
+            "cache_2d" => InlineFunction::Cache2d(field("argument")?),
+            "cache_once" => InlineFunction::CacheOnce(field("argument")?),
+            "cache_all_in_cell" => InlineFunction::CacheAllInCell(field("argument")?),
+            "blend_density" => InlineFunction::BlendDensity(field("argument")?),
+            "abs" => InlineFunction::Abs(field("argument")?),
+            "square" => InlineFunction::Square(field("argument")?),
+            "cube" => InlineFunction::Cube(field("argument")?),
+            "half_negative" => InlineFunction::HalfNegative(field("argument")?),
+            "quarter_negative" => InlineFunction::QuarterNegative(field("argument")?),
+            "squeeze" => InlineFunction::Squeeze(field("argument")?),
+            "invert" => InlineFunction::Invert(field("argument")?),
+            "add" => InlineFunction::Add(field("argument1")?, field("argument2")?),
+            "mul" => InlineFunction::Mul(field("argument1")?, field("argument2")?),
+            "min" => InlineFunction::Min(field("argument1")?, field("argument2")?),
+            "max" => InlineFunction::Max(field("argument1")?, field("argument2")?),
+            "noise" => InlineFunction::Noise {
                 noise: noise("noise")?,
                 xz_scale: num("xz_scale")?,
                 y_scale: num("y_scale")?,
             },
-            "minecraft:shifted_noise" => InlineFunction::ShiftedNoise {
+            "shifted_noise" => InlineFunction::ShiftedNoise {
                 noise: noise("noise")?,
                 xz_scale: num("xz_scale")?,
                 y_scale: num("y_scale")?,
@@ -221,34 +245,65 @@ impl DensityFunction {
                 shift_y: field("shift_y")?,
                 shift_z: field("shift_z")?,
             },
-            "minecraft:shift_a" => InlineFunction::ShiftA(noise("argument")?),
-            "minecraft:shift_b" => InlineFunction::ShiftB(noise("argument")?),
-            "minecraft:shift" => InlineFunction::Shift(noise("argument")?),
-            "minecraft:weird_scaled_sampler" => InlineFunction::WeirdScaledSampler {
+            "shift_a" => InlineFunction::ShiftA(noise("argument")?),
+            "shift_b" => InlineFunction::ShiftB(noise("argument")?),
+            "shift" => InlineFunction::Shift(noise("argument")?),
+            "weird_scaled_sampler" => InlineFunction::WeirdScaledSampler {
                 rarity_value_mapper: string("rarity_value_mapper")?,
                 noise: noise("noise")?,
                 input: field("input")?,
             },
-            "minecraft:clamp" => InlineFunction::Clamp {
+            "clamp" => InlineFunction::Clamp {
                 input: field("input")?,
                 min: num("min")?,
                 max: num("max")?,
             },
-            "minecraft:range_choice" => InlineFunction::RangeChoice {
+            "range_choice" => InlineFunction::RangeChoice {
                 input: field("input")?,
                 min_inclusive: num("min_inclusive")?,
                 max_exclusive: num("max_exclusive")?,
                 when_in_range: field("when_in_range")?,
                 when_out_of_range: field("when_out_of_range")?,
             },
-            "minecraft:y_clamped_gradient" => InlineFunction::YClampedGradient {
+            "interval_select" => {
+                let thresholds = value
+                    .get("thresholds")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| format!("`{kind}` missing array `thresholds`"))?
+                    .iter()
+                    .map(|v| {
+                        v.as_f64()
+                            .ok_or_else(|| format!("`{kind}` has a non-numeric threshold"))
+                    })
+                    .collect::<Result<Vec<f64>, String>>()?;
+                let functions = value
+                    .get("functions")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| format!("`{kind}` missing array `functions`"))?
+                    .iter()
+                    .cloned()
+                    .map(Self::from_value)
+                    .collect::<Result<Vec<DensityFunction>, String>>()?;
+                InlineFunction::IntervalSelect {
+                    input: field("input")?,
+                    thresholds,
+                    functions,
+                }
+            }
+            "y_clamped_gradient" => InlineFunction::YClampedGradient {
                 from_y: num("from_y")?,
                 to_y: num("to_y")?,
                 from_value: num("from_value")?,
                 to_value: num("to_value")?,
             },
-            "minecraft:constant" => InlineFunction::Constant(num("argument")?),
-            "minecraft:spline" => {
+            "find_top_surface" => InlineFunction::FindTopSurface {
+                density: field("density")?,
+                upper_bound: field("upper_bound")?,
+                lower_bound: num("lower_bound")? as i32,
+                cell_height: num("cell_height")? as i32,
+            },
+            "constant" => InlineFunction::Constant(num("argument")?),
+            "spline" => {
                 let spline = value
                     .get("spline")
                     .cloned()
@@ -257,10 +312,17 @@ impl DensityFunction {
                     serde_json::from_value(spline).map_err(|e| e.to_string())?,
                 )
             }
-            "minecraft:end_islands" => InlineFunction::EndIslands,
-            "minecraft:blend_alpha" => InlineFunction::BlendAlpha,
-            "minecraft:blend_offset" => InlineFunction::BlendOffset,
-            "minecraft:beardifier" => InlineFunction::Beardifier,
+            "old_blended_noise" => InlineFunction::OldBlendedNoise {
+                xz_scale: num("xz_scale")?,
+                y_scale: num("y_scale")?,
+                xz_factor: num("xz_factor")?,
+                y_factor: num("y_factor")?,
+                smear_scale_multiplier: num("smear_scale_multiplier")?,
+            },
+            "end_islands" => InlineFunction::EndIslands,
+            "blend_alpha" => InlineFunction::BlendAlpha,
+            "blend_offset" => InlineFunction::BlendOffset,
+            "beardifier" => InlineFunction::Beardifier,
             // `old_blended_noise` and any future/unknown type: keep raw, don't fail
             _ => return Ok(Self::Unknown { kind }),
         };
@@ -315,6 +377,46 @@ mod tests {
     }
 
     #[test]
+    fn parses_interval_select() {
+        // The shape Terralith 26.2 overworld/caves/entrances.json uses
+        let df = parse(
+            r#"{
+                "type": "minecraft:interval_select",
+                "input": { "type": "minecraft:noise", "noise": "minecraft:spaghetti_3d_rarity", "xz_scale": 2.0, "y_scale": 1.0 },
+                "thresholds": [-0.5, 0.0, 0.5],
+                "functions": [
+                    { "type": "minecraft:mul", "argument1": 0.75, "argument2": "minecraft:spaghetti_3d_1" },
+                    1.0,
+                    "minecraft:zero",
+                    { "type": "minecraft:mul", "argument1": 2.0, "argument2": "minecraft:spaghetti_3d_1" }
+                ]
+            }"#,
+        );
+        let DensityFunction::Inline(inner) = df else {
+            panic!("expected inline");
+        };
+        let InlineFunction::IntervalSelect {
+            thresholds,
+            functions,
+            ..
+        } = *inner
+        else {
+            panic!("expected interval_select");
+        };
+        assert_eq!(thresholds, vec![-0.5, 0.0, 0.5]);
+        // functions must be exactly one longer than thresholds
+        assert_eq!(functions.len(), thresholds.len() + 1);
+        // interval_select must NOT be reported as an unmodeled type
+        assert!(
+            parse(
+                r#"{ "type": "minecraft:interval_select", "input": 0.0, "thresholds": [0.0], "functions": [0.0, 1.0] }"#
+            )
+            .unknown_kind()
+            .is_none()
+        );
+    }
+
+    #[test]
     fn parses_noise_and_spline() {
         let df = parse(
             r#"{ "type": "minecraft:noise", "noise": "minecraft:cave_entrance", "xz_scale": 0.75, "y_scale": 0.5 }"#,
@@ -338,7 +440,45 @@ mod tests {
 
     #[test]
     fn unknown_type_is_retained_not_failed() {
-        let df = parse(r#"{ "type": "minecraft:old_blended_noise", "xz_scale": 1.0 }"#);
-        assert_eq!(df.unknown_kind(), Some("minecraft:old_blended_noise"));
+        // A hypothetical future/mod node type we don't model: retained, not failed
+        let df = parse(r#"{ "type": "minecraft:some_future_node", "foo": 1.0 }"#);
+        assert_eq!(df.unknown_kind(), Some("minecraft:some_future_node"));
+    }
+
+    #[test]
+    fn parses_find_top_surface_and_invert() {
+        let df = parse(
+            r#"{ "type": "minecraft:find_top_surface", "cell_height": 8, "lower_bound": -64,
+                 "density": 0.0, "upper_bound": { "type": "invert", "argument": 1.0 } }"#,
+        );
+        let DensityFunction::Inline(inner) = df else {
+            panic!("expected inline find_top_surface");
+        };
+        let InlineFunction::FindTopSurface {
+            cell_height,
+            lower_bound,
+            upper_bound,
+            ..
+        } = *inner
+        else {
+            panic!("expected FindTopSurface");
+        };
+        assert_eq!(cell_height, 8);
+        assert_eq!(lower_bound, -64);
+        // The `upper_bound` used a namespace-less `invert`
+        assert!(matches!(upper_bound, DensityFunction::Inline(b) if matches!(*b, InlineFunction::Invert(_))));
+    }
+
+    #[test]
+    fn parses_old_blended_noise() {
+        // Namespace-less `type`, as datapacks commonly write it
+        let df = parse(
+            r#"{ "type": "old_blended_noise", "xz_scale": 0.25, "y_scale": 0.125,
+                 "xz_factor": 80.0, "y_factor": 160.0, "smear_scale_multiplier": 8.0 }"#,
+        );
+        assert!(matches!(
+            df,
+            DensityFunction::Inline(b) if matches!(*b, InlineFunction::OldBlendedNoise { .. })
+        ));
     }
 }

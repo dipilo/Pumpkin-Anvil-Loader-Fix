@@ -146,6 +146,20 @@ fn scan_zip(path: &Path, out: &mut RawWorldgen) {
         }
     };
 
+    // Datapacks may hide per-version worldgen in `pack.mcmeta` overlays
+    let overlay_dirs = {
+        let mut mcmeta = String::new();
+        match archive.by_name("pack.mcmeta") {
+            Ok(mut f) => {
+                let _ = f.read_to_string(&mut mcmeta);
+                parse_overlay_dirs(&mcmeta)
+            }
+            Err(_) => Vec::new(),
+        }
+    };
+
+    // Collect first, then insert in ascending priority
+    let mut collected: Vec<(usize, Category, String, String)> = Vec::new();
     for i in 0..archive.len() {
         let mut entry = match archive.by_index(i) {
             Ok(e) => e,
@@ -157,7 +171,8 @@ fn scan_zip(path: &Path, out: &mut RawWorldgen) {
         if !entry.is_file() {
             continue;
         }
-        let Some((category, id)) = classify(entry.name()) else {
+        let Some((priority, category, id)) = classify_with_overlays(entry.name(), &overlay_dirs)
+        else {
             continue;
         };
         let mut contents = String::new();
@@ -165,14 +180,90 @@ fn scan_zip(path: &Path, out: &mut RawWorldgen) {
             debug!("Failed to read zip entry {}: {e}", entry.name());
             continue;
         }
+        collected.push((priority, category, id, contents));
+    }
+    collected.sort_by_key(|(priority, _, _, _)| *priority);
+    for (_, category, id, contents) in collected {
         out.insert(category, id, contents);
     }
 }
 
-/// Scan an unpacked datapack folder for worldgen JSON
+/// Active overlay directories from a datapack `pack.mcmeta`, ordered by `min_format` ascending
+fn parse_overlay_dirs(mcmeta: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(mcmeta) else {
+        return Vec::new();
+    };
+    let Some(entries) = value
+        .get("overlays")
+        .and_then(|o| o.get("entries"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<(i64, String)> = Vec::new();
+    for entry in entries {
+        let Some(dir) = entry.get("directory").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        // `min_format`, or the low end of `formats` (int, [lo,hi], or {min_inclusive})
+        let min_format = entry
+            .get("min_format")
+            .and_then(serde_json::Value::as_i64)
+            .or_else(|| match entry.get("formats") {
+                Some(serde_json::Value::Number(n)) => n.as_i64(),
+                Some(serde_json::Value::Array(a)) => a.first().and_then(serde_json::Value::as_i64),
+                Some(serde_json::Value::Object(o)) => {
+                    o.get("min_inclusive").and_then(serde_json::Value::as_i64)
+                }
+                _ => None,
+            })
+            .unwrap_or(0);
+        dirs.push((min_format, dir.to_string()));
+    }
+    dirs.sort_by_key(|(format, _)| *format);
+    dirs.into_iter().map(|(_, dir)| dir).collect()
+}
+
+/// Classify an archive entry, allowing an optional active-overlay prefix
+fn classify_with_overlays(
+    name: &str,
+    overlay_dirs: &[String],
+) -> Option<(usize, Category, String)> {
+    if name.starts_with("data/") {
+        let (category, id) = classify(name)?;
+        return Some((0, category, id));
+    }
+    for (index, dir) in overlay_dirs.iter().enumerate() {
+        if let Some(rest) = name
+            .strip_prefix(dir.as_str())
+            .and_then(|r| r.strip_prefix('/'))
+            && rest.starts_with("data/")
+        {
+            let (category, id) = classify(rest)?;
+            return Some((index + 1, category, id));
+        }
+    }
+    None
+}
+
+/// Scan an unpacked datapack folder for worldgen JSON, including `pack.mcmeta`
 fn scan_folder(root: &Path, out: &mut RawWorldgen) {
-    let data_dir = root.join("data");
-    let Ok(namespaces) = std::fs::read_dir(&data_dir) else {
+    scan_data_dir(&root.join("data"), out);
+    let overlay_dirs = match std::fs::read_to_string(root.join("pack.mcmeta")) {
+        Ok(mcmeta) => parse_overlay_dirs(&mcmeta),
+        Err(_) => Vec::new(),
+    };
+    for dir in overlay_dirs {
+        let overlay_data = root.join(&dir).join("data");
+        if overlay_data.is_dir() {
+            scan_data_dir(&overlay_data, out);
+        }
+    }
+}
+
+/// Scan a single `data/` directory (base or overlay) for worldgen JSON
+fn scan_data_dir(data_dir: &Path, out: &mut RawWorldgen) {
+    let Ok(namespaces) = std::fs::read_dir(data_dir) else {
         return;
     };
     for ns_entry in namespaces.flatten() {
@@ -184,7 +275,7 @@ fn scan_folder(root: &Path, out: &mut RawWorldgen) {
         collect_json_files(&ns_path, &mut files);
         for file in files {
             // Build a forward-slash relative path `data/<ns>/...`
-            let Ok(relative) = file.strip_prefix(&data_dir) else {
+            let Ok(relative) = file.strip_prefix(data_dir) else {
                 continue;
             };
             let mut rel = String::from("data/");
@@ -274,6 +365,54 @@ mod tests {
         assert_eq!(
             classify("data/terralith/worldgen/noise/sample.json"),
             Some((Category::Noise, "terralith:sample".to_string()))
+        );
+    }
+
+    #[test]
+    fn parses_and_applies_overlay_dirs() {
+        // tectonic-style mcmeta: overlays sorted by min_format ascending
+        let mcmeta = r#"{
+            "pack": { "pack_format": 15 },
+            "overlays": { "entries": [
+                { "directory": "overlay.datapack", "min_format": 1, "max_format": 999 },
+                { "directory": "overlay.26_2", "formats": [107, 999] },
+                { "directory": "overlay.1_21_9", "min_format": 82, "max_format": 999 }
+            ] }
+        }"#;
+        let dirs = parse_overlay_dirs(mcmeta);
+        // Ascending by min_format: datapack(1) < 1_21_9(82) < 26_2(107)
+        assert_eq!(dirs, vec!["overlay.datapack", "overlay.1_21_9", "overlay.26_2"]);
+
+        // Base data/ is priority 0; overlays get their 1-based rank
+        assert_eq!(
+            classify_with_overlays("data/tectonic/worldgen/noise/ridge.json", &dirs),
+            Some((0, Category::Noise, "tectonic:ridge".to_string()))
+        );
+        assert_eq!(
+            classify_with_overlays(
+                "overlay.datapack/data/tectonic/worldgen/density_function/__constants/noise/ridge.json",
+                &dirs,
+            ),
+            Some((
+                1,
+                Category::DensityFunction,
+                "tectonic:__constants/noise/ridge".to_string()
+            ))
+        );
+        assert_eq!(
+            classify_with_overlays(
+                "overlay.26_2/data/minecraft/worldgen/noise_settings/overworld.json",
+                &dirs,
+            ),
+            Some((3, Category::NoiseSettings, "minecraft:overworld".to_string()))
+        );
+        // A shipped-but-not-declared overlay is ignored
+        assert!(
+            classify_with_overlays(
+                "overlay.terratonic/data/tectonic/worldgen/noise/ridge.json",
+                &dirs,
+            )
+            .is_none()
         );
     }
 
