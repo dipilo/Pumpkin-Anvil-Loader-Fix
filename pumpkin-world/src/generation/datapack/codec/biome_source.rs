@@ -88,8 +88,8 @@ impl<'de> Deserialize<'de> for Param {
             Range([f64; 2]),
         }
         Ok(match Raw::deserialize(deserializer)? {
-            Raw::Point(v) => Param { min: v, max: v },
-            Raw::Range([min, max]) => Param { min, max },
+            Raw::Point(v) => Self { min: v, max: v },
+            Raw::Range([min, max]) => Self { min, max },
         })
     }
 }

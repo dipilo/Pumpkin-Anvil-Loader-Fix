@@ -184,23 +184,35 @@ impl ChunkData {
         chunk_data: &[u8],
         position: Vector2<i32>,
     ) -> Result<Self, ChunkParsingError> {
-        // 1. Try vanilla Anvil / datapack-world format first
-        //    This is a named-root NBT compound
-        if let Ok(anvil_root) = pumpkin_nbt::from_bytes::<anvil::AnvilChunkRoot>(
+        // Vanilla Anvil / datapack-world format
+        let anvil_err = match pumpkin_nbt::from_bytes::<anvil::AnvilChunkRoot>(
             std::io::Cursor::new(chunk_data),
         ) {
-            let chunk_nbt = convert_anvil_root_to_chunk_nbt(anvil_root);
+            Ok(anvil_root) => {
+                let chunk_nbt = convert_anvil_root_to_chunk_nbt(anvil_root);
+                return Self::from_chunk_nbt(chunk_nbt, position);
+            }
+            Err(e) => e,
+        };
+
+        // Pumpkin's native format
+        let native_err = match pumpkin_nbt::from_bytes::<ChunkNbt>(
+            std::io::Cursor::new(chunk_data),
+        ) {
+            Ok(chunk_nbt) => return Self::from_chunk_nbt(chunk_nbt, position),
+            Err(e) => e,
+        };
+
+        // Unnamed-root native compound
+        if let Ok(chunk_nbt) =
+            pumpkin_nbt::from_bytes_unnamed::<ChunkNbt>(std::io::Cursor::new(chunk_data))
+        {
             return Self::from_chunk_nbt(chunk_nbt, position);
         }
 
-        // 2. Fallback to Pumpkin's native/internal format
-        //    This is the only place where unnamed-root parsing makes sense
-        let chunk_nbt = pumpkin_nbt::from_bytes_unnamed::<ChunkNbt>(
-            std::io::Cursor::new(chunk_data),
-        )
-        .map_err(|e| ChunkParsingError::ErrorDeserializingChunk(e.to_string()))?;
-
-        Self::from_chunk_nbt(chunk_nbt, position)
+        Err(ChunkParsingError::ErrorDeserializingChunk(format!(
+            "anvil-format parse failed ({anvil_err}); native-format parse failed ({native_err})"
+        )))
     }
 
     fn internal_to_bytes(&self) -> Result<Bytes, ChunkSerializingError> {
@@ -661,4 +673,57 @@ struct EntityNbt {
     data_version: i32,
     position: [i32; 2],
     entities: Vec<NbtCompound>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chunk::{ChunkData, ChunkLight, ChunkSections};
+    use crate::tick::scheduler::ChunkTickScheduler;
+    use pumpkin_data::{Block, chunk::ChunkStatus};
+
+    fn empty_chunk(x: i32, z: i32, min_y: i32, sections: usize) -> ChunkData {
+        ChunkData {
+            section: ChunkSections::new(sections, min_y),
+            heightmap: std::sync::Mutex::default(),
+            x,
+            z,
+            block_ticks: ChunkTickScheduler::default(),
+            fluid_ticks: ChunkTickScheduler::default(),
+            pending_block_entities: std::sync::Mutex::new(FxHashMap::default()),
+            light_engine: std::sync::Mutex::new(ChunkLight::default()),
+            light_populated: AtomicBool::new(false),
+            status: ChunkStatus::Full,
+            blending_data: None,
+            dirty: AtomicBool::new(true),
+        }
+    }
+
+    /// A regression broke every `.pump` chunk with a misleading `missing field DataVersion`
+    /// whoops
+    #[test]
+    fn native_chunk_round_trips_through_bytes() {
+        let min_y = -64;
+        let chunk = empty_chunk(3, -5, min_y, 24);
+        let stone = Block::STONE.default_state.id;
+        chunk
+            .section
+            .set_block_absolute_y(1, min_y + 2, 2, stone);
+
+        let bytes = chunk.internal_to_bytes().expect("serialize");
+
+        // Written payload is a named root compound with an empty name
+        assert_eq!(&bytes[..3], &[0x0a, 0x00, 0x00], "expected named root");
+
+        let read = ChunkData::internal_from_bytes(&bytes, Vector2::new(3, -5))
+            .expect("native chunk must deserialize (regression: missing field DataVersion)");
+
+        assert_eq!(read.x, 3);
+        assert_eq!(read.z, -5);
+        assert_eq!(
+            read.section.get_block_absolute_y(1, min_y + 2, 2),
+            Some(stone),
+            "block placed before save must survive the round-trip"
+        );
+    }
 }

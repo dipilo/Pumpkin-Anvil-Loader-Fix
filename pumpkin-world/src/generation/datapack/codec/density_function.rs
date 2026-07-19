@@ -283,7 +283,7 @@ impl DensityFunction {
                     .iter()
                     .cloned()
                     .map(Self::from_value)
-                    .collect::<Result<Vec<DensityFunction>, String>>()?;
+                    .collect::<Result<Vec<Self>, String>>()?;
                 InlineFunction::IntervalSelect {
                     input: field("input")?,
                     thresholds,

@@ -28,11 +28,11 @@ pub enum SurfaceRule {
     #[serde(rename = "minecraft:block")]
     Block { result_state: Value },
     #[serde(rename = "minecraft:sequence")]
-    Sequence { sequence: Vec<SurfaceRule> },
+    Sequence { sequence: Vec<Self> },
     #[serde(rename = "minecraft:condition")]
     Condition {
         if_true: SurfaceCondition,
-        then_run: Box<SurfaceRule>,
+        then_run: Box<Self>,
     },
     #[serde(rename = "minecraft:bandlands")]
     Badlands,
@@ -76,7 +76,7 @@ pub enum SurfaceCondition {
     #[serde(rename = "minecraft:steep")]
     Steep,
     #[serde(rename = "minecraft:not")]
-    Not { invert: Box<SurfaceCondition> },
+    Not { invert: Box<Self> },
     #[serde(rename = "minecraft:hole")]
     Hole,
     #[serde(rename = "minecraft:above_preliminary_surface")]
@@ -100,7 +100,7 @@ pub enum YOffsetJson {
 }
 
 impl YOffsetJson {
-    fn build(&self) -> YOffset {
+    const fn build(&self) -> YOffset {
         match *self {
             Self::Absolute { absolute } => YOffset::Absolute(Absolute { absolute }),
             Self::AboveBottom { above_bottom } => YOffset::AboveBottom(AboveBottom { above_bottom }),
@@ -300,6 +300,24 @@ mod tests {
 
     #[test]
     fn parses_nested_block_condition_rule() {
+        struct NoLookup;
+        impl WorldgenLookup for NoLookup {
+            fn density_function(
+                &self,
+                _id: &str,
+            ) -> Option<&crate::generation::datapack::codec::density_function::DensityFunction>
+            {
+                None
+            }
+            fn noise(
+                &self,
+                _id: &str,
+            ) -> Option<&crate::generation::datapack::codec::density_function::NoiseParameters>
+            {
+                None
+            }
+        }
+
         // block, sequence, condition + vanilla biome / vertical_gradient / y_above
         let json = serde_json::json!({
             "type": "minecraft:sequence",
@@ -321,24 +339,6 @@ mod tests {
                 }
             ]
         });
-
-        struct NoLookup;
-        impl WorldgenLookup for NoLookup {
-            fn density_function(
-                &self,
-                _id: &str,
-            ) -> Option<&crate::generation::datapack::codec::density_function::DensityFunction>
-            {
-                None
-            }
-            fn noise(
-                &self,
-                _id: &str,
-            ) -> Option<&crate::generation::datapack::codec::density_function::NoiseParameters>
-            {
-                None
-            }
-        }
 
         let rule = build_surface_rule(&json, &NoLookup).expect("should build");
         let MaterialRule::Sequence(seq) = rule else {

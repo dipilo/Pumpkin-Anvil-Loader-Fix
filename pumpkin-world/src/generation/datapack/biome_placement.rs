@@ -53,9 +53,8 @@ impl DatapackBiomeSupplier {
         let mut best_dist = i64::MAX;
         for entry in &self.entries {
             let mut dist = 0i64;
-            for axis in 0..7 {
+            for (axis, &p) in point.iter().enumerate() {
                 let (lo, hi) = entry.ranges[axis];
-                let p = point[axis];
                 let d = if p > hi {
                     p - hi
                 } else if p < lo {
@@ -87,9 +86,8 @@ impl DatapackBiomeSupplier {
         let mut target_dist = i64::MAX;
         for entry in &self.entries {
             let mut dist = 0i64;
-            for axis in 0..7 {
+            for (axis, &p) in point.iter().enumerate() {
                 let (lo, hi) = entry.ranges[axis];
-                let p = point[axis];
                 let d = if p > hi {
                     p - hi
                 } else if p < lo {
@@ -117,9 +115,8 @@ impl DatapackBiomeSupplier {
     pub fn debug_axis_gap(&self, point: &[i64; 7], target: u8) -> [i64; 7] {
         let axis_dist = |entry: &PlacementEntry| -> ([i64; 7], i64) {
             let mut a = [0i64; 7];
-            for axis in 0..7 {
+            for (axis, &p) in point.iter().enumerate() {
                 let (lo, hi) = entry.ranges[axis];
-                let p = point[axis];
                 let d = if p > hi {
                     p - hi
                 } else if p < lo {
@@ -164,9 +161,8 @@ impl DatapackBiomeSupplier {
                 continue;
             }
             let mut dist = 0i64;
-            for axis in 0..7 {
+            for (axis, &p) in point.iter().enumerate() {
                 let (lo, hi) = entry.ranges[axis];
-                let p = point[axis];
                 let d = if p > hi {
                     p - hi
                 } else if p < lo {
@@ -185,12 +181,12 @@ impl DatapackBiomeSupplier {
 
     /// Number of placement entries that resolved to a biome id
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.entries.len()
     }
 
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 }

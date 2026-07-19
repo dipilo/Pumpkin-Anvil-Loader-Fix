@@ -126,10 +126,18 @@ pub fn carve(chunk: &mut ProtoChunk, generator: &VanillaGenerator) {
     let chunk_z = chunk.z;
     let chunk_pos = Vector2::new(chunk_x, chunk_z);
 
-    let carvers_to_use = carvers_for_dimension(&generator.dimension);
-
     let start_x = crate::generation::positions::chunk_pos::start_block_x(chunk_x);
     let start_z = crate::generation::positions::chunk_pos::start_block_z(chunk_z);
+
+    // Datapack-driven carvers
+    let datapack_carvers = crate::generation::datapack::carvers::has_active_carvers().then(|| {
+        let biome_id = chunk.get_terrain_gen_biome_id(start_x, 0, start_z);
+        crate::generation::datapack::carvers::biome_carvers(biome_id)
+    });
+    let carvers_to_use: Vec<&'static CarverConfig> = match datapack_carvers {
+        Some(Some(list)) => list,
+        _ => carvers_for_dimension(&generator.dimension).to_vec(),
+    };
     let generation_shape = &generator.settings.shape;
     let horizontal_cell_count = 16 / generation_shape.horizontal_cell_block_count();
 

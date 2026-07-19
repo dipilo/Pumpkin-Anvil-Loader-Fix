@@ -97,12 +97,10 @@ impl MoveControlTrait for MoveControl {
             if entity.on_ground.load(Ordering::Relaxed) {
                 self.operation = Operation::Wait;
             }
-        } else {
-            if mob_entity.navigator.lock().unwrap().is_idle() {
-                living_entity
-                    .movement_input
-                    .store(Vector3::new(0.0, 0.0, 0.0));
-            }
+        } else if mob_entity.navigator.lock().unwrap().is_idle() {
+            living_entity
+                .movement_input
+                .store(Vector3::new(0.0, 0.0, 0.0));
         }
     }
 }

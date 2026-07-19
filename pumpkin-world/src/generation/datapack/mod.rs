@@ -1,6 +1,8 @@
 //! Datapack-driven world generation
 pub mod biome_placement;
+pub mod carvers;
 pub mod codec;
+pub mod features;
 pub mod flatten;
 mod source;
 mod vanilla;
@@ -82,11 +84,15 @@ impl WorldgenData {
             return;
         }
         info!(
-            "Datapack worldgen indexed: {} noise_settings, {} density_function, {} noise, {} dimension",
+            "Datapack worldgen indexed: {} noise_settings, {} density_function, {} noise, \
+             {} dimension, {} configured_feature, {} placed_feature, {} configured_carver",
             self.raw.count(Category::NoiseSettings),
             self.raw.count(Category::DensityFunction),
             self.raw.count(Category::Noise),
             self.raw.count(Category::Dimension),
+            self.raw.count(Category::ConfiguredFeature),
+            self.raw.count(Category::PlacedFeature),
+            self.raw.count(Category::ConfiguredCarver),
         );
 
         // Best-effort scan for unmodeled density-function types
@@ -591,8 +597,7 @@ mod tests {
     }
 
     /// Validates parsing against the real Terralith/Tectonic/CliffTree packs
-    /// Ignored by default (depends on local datapacks)
-    /// Point the `WORLDGEN_PACK_DIR` env var at a folder of datapacks (.zip or extracted) and run with:
+    /// Ignored by default; set `WORLDGEN_PACK_DIR` to a datapacks folder and run with:
     /// `WORLDGEN_PACK_DIR="<path to datapacks>" cargo test -p pumpkin-world -- --ignored --nocapture parses_real_terralith`
     #[test]
     #[ignore = "requires local datapacks; set WORLDGEN_PACK_DIR"]
@@ -691,7 +696,7 @@ mod tests {
     /// (>=65) and whose `noise_threshold` conditions resolve the pack's custom noises
     #[test]
     #[ignore = "requires local datapacks; set WORLDGEN_PACK_DIR"]
-    #[allow(clippy::print_stderr)]
+    #[allow(clippy::print_stderr, clippy::items_after_statements)]
     fn datapack_surface_rule_resolves_modded_biomes() {
         use crate::chunk::dynamic_biome::DYNAMIC_BIOMES;
         use crate::generation::datapack::codec::surface_rule::build_surface_rule;
@@ -709,9 +714,9 @@ mod tests {
         // Register modded biomes so names resolve to their runtime ids
         {
             let mut registry = DYNAMIC_BIOMES.write().unwrap();
-            registry.load_datapack_definitions(&[dir.clone()]);
-            registry.register_datapack_biomes();
-        }
+            registry.load_datapack_definitions(std::slice::from_ref(&dir));
+            registry.register_datapack_biomes()
+        };
         let data = WorldgenData::load(&[dir]);
         let settings = data
             .noise_settings("minecraft:overworld")
@@ -796,9 +801,9 @@ mod tests {
         // Loading the datapack registers its modded biomes and installs its worldgen
         {
             let mut registry = DYNAMIC_BIOMES.write().unwrap();
-            registry.load_datapack_definitions(&[dir.clone()]);
-            registry.register_datapack_biomes();
-        }
+            registry.load_datapack_definitions(std::slice::from_ref(&dir));
+            registry.register_datapack_biomes()
+        };
         set_active_worldgen(WorldgenData::load(&[dir]));
 
         // `ProtoChunk::new` takes the `WorldGenerator` enum
@@ -852,7 +857,12 @@ mod tests {
     /// Golden-chunk biome parity
     #[test]
     #[ignore = "golden-chunk parity vs a real world; set GOLDEN_WORLD_DIR"]
-    #[allow(clippy::print_stderr, clippy::cast_precision_loss)]
+    #[allow(
+        clippy::print_stderr,
+        clippy::cast_precision_loss,
+        clippy::too_many_lines,
+        clippy::items_after_statements
+    )]
     fn golden_chunk_biome_parity() {
         use crate::ProtoChunk;
         use crate::chunk::ChunkData;
@@ -887,9 +897,9 @@ mod tests {
         clear_dynamic_biomes();
         {
             let mut reg = DYNAMIC_BIOMES.write().unwrap();
-            reg.load_datapack_definitions(&[datapacks.clone()]);
-            reg.register_datapack_biomes();
-        }
+            reg.load_datapack_definitions(std::slice::from_ref(&datapacks));
+            reg.register_datapack_biomes()
+        };
         set_active_worldgen(WorldgenData::load(&[datapacks]));
 
         // id -> name for readable mismatch reports
@@ -1147,7 +1157,7 @@ mod tests {
         hist("GENERATED", &gen_hist);
 
         let mut conf: Vec<_> = confusion.into_iter().collect();
-        conf.sort_by(|a, b| b.1.cmp(&a.1));
+        conf.sort_by_key(|b| std::cmp::Reverse(b.1));
         eprintln!("top surface mismatches (ref -> gen : count):");
         for ((r, g), c) in conf.into_iter().take(20) {
             eprintln!("  {} -> {} : {c}", name_of(r), name_of(g));
@@ -1220,9 +1230,9 @@ mod tests {
         clear_dynamic_biomes();
         {
             let mut reg = DYNAMIC_BIOMES.write().unwrap();
-            reg.load_datapack_definitions(&[datapacks.clone()]);
-            reg.register_datapack_biomes();
-        }
+            reg.load_datapack_definitions(std::slice::from_ref(&datapacks));
+            reg.register_datapack_biomes()
+        };
 
         // Datapack router
         set_active_worldgen(WorldgenData::load(&[datapacks]));

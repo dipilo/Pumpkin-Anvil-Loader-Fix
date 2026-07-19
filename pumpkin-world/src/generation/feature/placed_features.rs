@@ -48,27 +48,6 @@ pub enum Feature {
 }
 
 impl PlacedFeature {
-    pub fn generate_in_proto_chunk(
-        &self,
-        chunk: &mut crate::ProtoChunk,
-        feature_name: pumpkin_data::placed_feature::PlacedFeature,
-        random: &mut RandomGenerator,
-        pos: BlockPos,
-    ) -> bool {
-        let feature = match &self.feature {
-            Feature::Named(name) => CONFIGURED_FEATURES
-                .get(name)
-                .expect("Name: {name:?} not found"),
-            Feature::Inlined(feature) => feature,
-        };
-        if let ConfiguredFeature::SculkPatch(feature) = feature {
-            feature.generate_in_proto_chunk(chunk, random, pos)
-        } else {
-            tracing::warn!("Placed feature {feature_name:?} is not supported in a jigsaw pool");
-            false
-        }
-    }
-
     #[expect(clippy::too_many_arguments)]
     pub fn generate<T: GenerationCache>(
         &self,
@@ -80,6 +59,8 @@ impl PlacedFeature {
         random: &mut RandomGenerator,
         pos: BlockPos,
     ) -> bool {
+        // Stable identity of placed feature, used by biome placement filter to scope datapack features per position
+        let feature_ptr = std::ptr::from_ref::<Self>(self) as usize;
         let mut stream: Vec<BlockPos> = vec![pos];
         for modifier in &self.placement {
             let mut new_stream = Vec::with_capacity(stream.len());
@@ -91,6 +72,7 @@ impl PlacedFeature {
                     min_y,
                     height,
                     feature_name,
+                    feature_ptr,
                     random,
                     block_pos,
                 );
@@ -152,6 +134,7 @@ impl PlacementModifier {
         min_y: i8,
         height: u16,
         feature: pumpkin_data::placed_feature::PlacedFeature,
+        feature_ptr: usize,
         random: &mut RandomGenerator,
         pos: BlockPos,
     ) -> Box<dyn Iterator<Item = BlockPos>> {
@@ -168,8 +151,8 @@ impl PlacementModifier {
             Self::SurfaceWaterDepthFilter(modifier) => {
                 modifier.get_positions(block_registry, chunk, feature, random, pos)
             }
-            Self::Biome(modifier) => {
-                modifier.get_positions(block_registry, chunk, feature, random, pos)
+            Self::Biome(_) => {
+                BiomePlacementModifier::get_positions(chunk, feature, feature_ptr, pos)
             }
             Self::Count(modifier) => modifier.get_positions(random, pos),
             Self::NoiseBasedCount(modifier) => Box::new(modifier.get_positions(random, pos)),
@@ -449,23 +432,26 @@ impl ConditionalPlacementModifier for SurfaceWaterDepthFilterPlacementModifier {
 
 pub struct BiomePlacementModifier;
 
-impl ConditionalPlacementModifier for BiomePlacementModifier {
-    fn should_place<T: GenerationCache>(
-        &self,
-        _block_registry: &dyn WorldPortalExt,
-        this_feature: pumpkin_data::placed_feature::PlacedFeature,
+impl BiomePlacementModifier {
+    /// Vanilla `BiomeFilter.shouldPlace`
+    fn get_positions<T: GenerationCache>(
         chunk: &T,
-        _random: &mut RandomGenerator,
+        this_feature: pumpkin_data::placed_feature::PlacedFeature,
+        feature_ptr: usize,
         pos: BlockPos,
-    ) -> bool {
-        let biome = chunk.get_biome_for_terrain_gen(pos.0.x, pos.0.y, pos.0.z);
-
-        for step in biome.features {
-            if step.contains(&this_feature) {
-                return true;
-            }
+    ) -> Box<dyn Iterator<Item = BlockPos>> {
+        let keep = if crate::generation::datapack::features::has_active_features() {
+            let biome_id = chunk.get_terrain_gen_biome_id(pos.0.x, pos.0.y, pos.0.z);
+            crate::generation::datapack::features::biome_lists_feature_ptr(biome_id, feature_ptr)
+        } else {
+            let biome = chunk.get_biome_for_terrain_gen(pos.0.x, pos.0.y, pos.0.z);
+            biome.features.iter().any(|step| step.contains(&this_feature))
+        };
+        if keep {
+            Box::new(iter::once(pos))
+        } else {
+            Box::new(iter::empty())
         }
-        false
     }
 }
 

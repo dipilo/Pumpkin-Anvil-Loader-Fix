@@ -140,14 +140,6 @@ impl Mob for WolfEntity {
             }
             entity.send_meta_data(
                 &[Metadata::new(
-                    TrackedData::VARIANT,
-                    MetaDataType::WOLF_VARIANT,
-                    VarInt(self.variant.load(Ordering::Relaxed) as i32),
-                )],
-                None,
-            );
-            entity.send_meta_data(
-                &[Metadata::new(
                     TrackedData::VARIANT_ID,
                     MetaDataType::WOLF_VARIANT,
                     VarInt(self.variant.load(Ordering::Relaxed) as i32),

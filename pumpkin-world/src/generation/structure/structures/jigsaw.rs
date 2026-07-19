@@ -467,7 +467,7 @@ impl StructurePieceBase for PoolElementStructurePiece {
     fn place(
         &mut self,
         chunk: &mut crate::ProtoChunk,
-        _block_registry: &dyn crate::world::WorldPortalExt,
+        block_registry: &dyn crate::world::WorldPortalExt,
         random: &mut pumpkin_util::random::RandomGenerator,
         _seed: i64,
         chunk_box: &pumpkin_util::math::block_box::BlockBox,
@@ -500,7 +500,19 @@ impl StructurePieceBase for PoolElementStructurePiece {
             && let Some(placed_feature) =
                 crate::generation::feature::placed_features::PLACED_FEATURES.get(&feature)
         {
-            placed_feature.generate_in_proto_chunk(chunk, feature, random, self.pos);
+            // Single proto-chunk acts as its own 1×1 GenerationCache 
+            // Every configured feature gets placed instead of warning out
+            let min_y = chunk.bottom_y();
+            let height = chunk.height();
+            placed_feature.generate(
+                chunk,
+                block_registry,
+                min_y,
+                height,
+                feature,
+                random,
+                self.pos,
+            );
         }
     }
 }

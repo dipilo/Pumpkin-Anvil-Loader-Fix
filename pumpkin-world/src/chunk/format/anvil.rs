@@ -1435,4 +1435,5 @@ mod tests {
             Err(CompressionError::UnknownCompression)
         ));
     }
+
 }

@@ -283,10 +283,11 @@ impl Level {
         }
         datapack_sources.extend(level_config.datapack_paths.iter().cloned());
 
-        // Reset the global dynamic-biome registry only when 
-        // THIS load will repopulate it from its own datapacks
+        // Reset the global dynamic-biome registry only when THIS load will repopulate it from its own datapacks
         if !datapack_sources.is_empty() {
             clear_dynamic_biomes();
+            crate::generation::datapack::features::clear_active_features();
+            crate::generation::datapack::carvers::clear_active_carvers();
         }
 
         // Fast path
@@ -307,6 +308,18 @@ impl Level {
         // index the world's worldgen registries (noise_settings/density_function/…) and install them
         if !datapack_sources.is_empty() {
             let worldgen = crate::generation::datapack::WorldgenData::load(&datapack_sources);
+            // Build datapack-driven feature decoration
+            if let Some(features) =
+                crate::generation::datapack::features::DatapackFeatureRegistry::build(worldgen.raw())
+            {
+                crate::generation::datapack::features::set_active_features(features);
+            }
+            // Build datapack-driven carvers
+            if let Some(carvers) =
+                crate::generation::datapack::carvers::DatapackCarverRegistry::build(worldgen.raw())
+            {
+                crate::generation::datapack::carvers::set_active_carvers(carvers);
+            }
             crate::generation::datapack::set_active_worldgen(worldgen);
         }
 

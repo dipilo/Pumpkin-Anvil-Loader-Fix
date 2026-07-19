@@ -1,24 +1,29 @@
 use pumpkin_data::{Block, BlockId, BlockState, tag};
 use pumpkin_util::{
     math::vector3::Vector3,
-    random::{RandomImpl, hash_block_pos, legacy_rand::LegacyRand},
+    random::{RandomGenerator, RandomImpl, hash_block_pos, legacy_rand::LegacyRand},
 };
 use serde::Deserialize;
 use std::sync::{Arc, LazyLock};
 
 use crate::ProtoChunk;
+use crate::block::BlockStateCodec;
+use crate::generation::rule::{
+    RuleTest, block_match::BlockMatchRuleTest, block_state_match::BlockStateMatchRuleTest,
+    random_block_match::RandomBlockMatchRuleTest,
+    random_block_state_match::RandomBlockStateMatchRuleTest, tag_match::TagMatchRuleTest,
+};
 
-#[derive(Clone)]
 pub enum StructureProcessor {
     BlockRot { integrity: f32, blocks: BlockTag },
     Rules(Vec<ProcessorRule>),
     ProtectedBlocks(BlockTag),
 }
 
-#[derive(Clone)]
+/// A single rule of a `minecraft:rule` structure processor
 pub struct ProcessorRule {
-    input_block: BlockId,
-    probability: f32,
+    input_predicate: RuleTest,
+    location_predicate: RuleTest,
     output_state: &'static BlockState,
 }
 
@@ -63,13 +68,19 @@ impl StructureProcessor {
                 (random.next_f32() <= *integrity).then_some(state)
             }
             Self::Rules(rules) => {
-                let mut random = LegacyRand::from_seed(hash_block_pos(pos.x, pos.y, pos.z) as u64);
-                rules
-                    .iter()
-                    .find(|rule| {
-                        input_block == rule.input_block && random.next_f32() < rule.probability
-                    })
-                    .map_or(Some(state), |rule| Some(rule.output_state))
+                let mut random = RandomGenerator::Legacy(LegacyRand::from_seed(
+                    hash_block_pos(pos.x, pos.y, pos.z) as u64,
+                ));
+                let input_state = state.id;
+                let world_state = chunk.get_block_state(&pos);
+                for rule in rules {
+                    if rule.input_predicate.test(input_state, &mut random)
+                        && rule.location_predicate.test(world_state, &mut random)
+                    {
+                        return Some(rule.output_state);
+                    }
+                }
+                Some(state)
             }
             Self::ProtectedBlocks(blocks) => {
                 let existing = chunk.get_block_state(&pos).to_block_id();
@@ -100,20 +111,87 @@ enum RawProcessor {
 
 #[derive(Deserialize)]
 struct RawRule {
-    input_predicate: RawInputPredicate,
-    output_state: RawOutputState,
+    input_predicate: RawRuleTest,
+    location_predicate: RawRuleTest,
+    output_state: BlockStateCodec,
 }
 
+/// A vanilla `RuleTest`, tagged by `predicate_type`
 #[derive(Deserialize)]
-struct RawInputPredicate {
-    block: String,
-    probability: f32,
+#[serde(tag = "predicate_type")]
+enum RawRuleTest {
+    #[serde(rename = "minecraft:always_true")]
+    AlwaysTrue,
+    #[serde(rename = "minecraft:block_match")]
+    BlockMatch { block: String },
+    #[serde(rename = "minecraft:blockstate_match")]
+    BlockStateMatch { block_state: BlockStateCodec },
+    #[serde(rename = "minecraft:random_block_match")]
+    RandomBlockMatch { block: String, probability: f32 },
+    #[serde(rename = "minecraft:random_blockstate_match")]
+    RandomBlockStateMatch {
+        block_state: BlockStateCodec,
+        probability: f32,
+    },
+    #[serde(rename = "minecraft:tag_match")]
+    TagMatch { tag: String },
+    /// Any unrecognized `predicate_type`
+    #[serde(other)]
+    Unknown,
 }
 
-#[derive(Deserialize)]
-struct RawOutputState {
-    #[serde(rename = "Name")]
-    name: String,
+impl RawRuleTest {
+    /// Convert into runtime [`RuleTest`]
+    fn build(self) -> Option<RuleTest> {
+        Some(match self {
+            Self::AlwaysTrue => RuleTest::AlwaysTrue,
+            Self::BlockMatch { block } => RuleTest::BlockMatch(BlockMatchRuleTest {
+                block: block_id_from_name(&block)?,
+            }),
+            Self::BlockStateMatch { block_state } => {
+                RuleTest::BlockStateMatch(BlockStateMatchRuleTest {
+                    block_state: block_state.get_state_id(),
+                })
+            }
+            Self::RandomBlockMatch { block, probability } => {
+                RuleTest::RandomBlockMatch(RandomBlockMatchRuleTest {
+                    block: block_id_from_name(&block)?,
+                    probability,
+                })
+            }
+            Self::RandomBlockStateMatch {
+                block_state,
+                probability,
+            } => RuleTest::RandomBlockStateMatch(RandomBlockStateMatchRuleTest {
+                block_state: block_state.get_state_id(),
+                probability,
+            }),
+            Self::TagMatch { tag } => RuleTest::TagMatch(TagMatchRuleTest {
+                tag: resolve_block_tag(&tag)?,
+            }),
+            Self::Unknown => return None,
+        })
+    }
+}
+
+fn block_id_from_name(name: &str) -> Option<BlockId> {
+    let stripped = name.strip_prefix("minecraft:").unwrap_or(name);
+    Block::from_name(stripped).map(|block| block.id)
+}
+
+/// Resolve a block-tag name (`#minecraft:foo` / `minecraft:foo` / `foo`) to a runtime [`tag::Tag`]
+fn resolve_block_tag(name: &str) -> Option<tag::Tag> {
+    let stripped = name.strip_prefix('#').unwrap_or(name);
+    let lookup = |key: &str| -> Option<tag::Tag> {
+        let values = tag::get_tag_values(tag::RegistryKey::Block, key)?;
+        let ids = tag::get_tag_ids(tag::RegistryKey::Block, key)?;
+        Some((values, ids))
+    };
+    lookup(stripped).or_else(|| {
+        (!stripped.contains(':'))
+            .then(|| lookup(&format!("minecraft:{stripped}")))
+            .flatten()
+    })
 }
 
 #[must_use]
@@ -153,22 +231,10 @@ pub fn load_processor_list(name: &str) -> Arc<[StructureProcessor]> {
                 rules
                     .into_iter()
                     .filter_map(|rule| {
-                        let input_name = rule
-                            .input_predicate
-                            .block
-                            .strip_prefix("minecraft:")
-                            .unwrap_or(&rule.input_predicate.block);
-                        let output_name = rule
-                            .output_state
-                            .name
-                            .strip_prefix("minecraft:")
-                            .unwrap_or(&rule.output_state.name);
-                        let input_block = Block::from_name(input_name)?;
-                        let output_block = Block::from_name(output_name)?;
                         Some(ProcessorRule {
-                            input_block: input_block.id,
-                            probability: rule.input_predicate.probability,
-                            output_state: output_block.default_state,
+                            input_predicate: rule.input_predicate.build()?,
+                            location_predicate: rule.location_predicate.build()?,
+                            output_state: rule.output_state.get_state(),
                         })
                     })
                     .collect(),
@@ -197,5 +263,17 @@ mod tests {
             load_processor_list("minecraft:ancient_city_walls_degradation").len(),
             3
         );
+    }
+
+    /// Regression: `street_plains` uses `block_match` / `always_true` rule tests
+    /// and `location_predicate`s, which previously failed to parse ("missing field `probability`")
+    #[test]
+    fn parses_street_plains_processor_list() {
+        let processors = load_processor_list("minecraft:street_plains");
+        assert_eq!(processors.len(), 1, "expected one rule processor");
+        match &processors[0] {
+            StructureProcessor::Rules(rules) => assert_eq!(rules.len(), 4),
+            _ => panic!("expected a rule processor"),
+        }
     }
 }

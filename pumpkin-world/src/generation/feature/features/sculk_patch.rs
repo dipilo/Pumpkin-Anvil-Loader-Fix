@@ -82,56 +82,6 @@ impl SculkPatchFeature {
         true
     }
 
-    pub fn generate_in_proto_chunk(
-        &self,
-        chunk: &mut crate::ProtoChunk,
-        random: &mut RandomGenerator,
-        pos: BlockPos,
-    ) -> bool {
-        if !can_spread_from_proto_chunk(chunk, pos) {
-            return false;
-        }
-
-        let mut spreader = SculkSpreader::new();
-        let total_rounds = self.spread_rounds + self.growth_rounds;
-        for round in 0..total_rounds {
-            for _ in 0..self.charge_count {
-                spreader.add_cursor(pos, self.amount_per_charge);
-            }
-            for _ in 0..self.spread_attempts {
-                spreader.update_cursors_in_proto_chunk(chunk, random, round < self.spread_rounds);
-            }
-            spreader.clear();
-        }
-
-        let below = pos.down();
-        if random.next_f32() <= self.catalyst_chance
-            && proto_chunk_state(chunk, below).is_some_and(|state| state.to_state().is_solid())
-        {
-            set_proto_chunk_state(chunk, pos, Block::SCULK_CATALYST.default_state);
-        }
-
-        for _ in 0..self.extra_rare_growths.get(random) {
-            let candidate = pos.offset(Vector3::new(
-                random.next_bounded_i32(5) - 2,
-                0,
-                random.next_bounded_i32(5) - 2,
-            ));
-            let below = candidate.down();
-            if proto_chunk_state(chunk, candidate).is_some_and(|state| state.to_state().is_air())
-                && proto_chunk_state(chunk, below).is_some_and(|state| {
-                    state
-                        .to_state()
-                        .is_side_solid(pumpkin_data::BlockDirection::Up)
-                })
-            {
-                set_proto_chunk_state(chunk, candidate, ancient_city_shrieker_state());
-            }
-        }
-
-        true
-    }
-
     fn can_spread_from<T: GenerationCache>(chunk: &T, pos: BlockPos) -> bool {
         let state = GenerationCache::get_block_state(chunk, &pos.0);
         let block_id = state.to_block_id();
@@ -283,60 +233,6 @@ impl SculkSpreader {
         }
         self.cursors = next_cursors;
     }
-
-    fn update_cursors_in_proto_chunk(
-        &mut self,
-        chunk: &mut crate::ProtoChunk,
-        random: &mut RandomGenerator,
-        spread_veins: bool,
-    ) {
-        let mut next_cursors = Vec::new();
-        for mut cursor in self.cursors.drain(..) {
-            if cursor.charge <= 0 {
-                continue;
-            }
-
-            let target_pos = cursor.pos.offset(Vector3::new(
-                random.next_bounded_i32(3) - 1,
-                random.next_bounded_i32(3) - 1,
-                random.next_bounded_i32(3) - 1,
-            ));
-            let Some(target_state) = proto_chunk_state(chunk, target_pos) else {
-                continue;
-            };
-            let target_block_id = target_state.to_block_id();
-            if is_sculk_replaceable(target_block_id) {
-                set_proto_chunk_state(chunk, target_pos, Block::SCULK.default_state);
-                if spread_veins {
-                    grow_sculk_veins_in_proto_chunk(chunk, target_pos);
-                }
-                cursor.pos = target_pos;
-                cursor.charge -= 1;
-            } else if target_block_id == BlockId::SCULK {
-                cursor.pos = target_pos;
-                cursor.charge -= 1;
-            }
-
-            if cursor.charge > 0 {
-                next_cursors.push(cursor);
-            }
-        }
-        self.cursors = next_cursors;
-    }
-}
-
-fn proto_chunk_state(chunk: &crate::ProtoChunk, pos: BlockPos) -> Option<BlockStateId> {
-    ((pos.0.x >> 4) == chunk.x && (pos.0.z >> 4) == chunk.z).then(|| chunk.get_block_state(&pos.0))
-}
-
-fn set_proto_chunk_state(
-    chunk: &mut crate::ProtoChunk,
-    pos: BlockPos,
-    state: &'static pumpkin_data::BlockState,
-) {
-    if (pos.0.x >> 4) == chunk.x && (pos.0.z >> 4) == chunk.z {
-        chunk.set_block_state(pos.0.x, pos.0.y, pos.0.z, state);
-    }
 }
 
 fn grow_sculk_veins<T: GenerationCache>(chunk: &mut T, sculk_pos: BlockPos) {
@@ -347,43 +243,4 @@ fn grow_sculk_veins<T: GenerationCache>(chunk: &mut T, sculk_pos: BlockPos) {
             chunk.set_block_state(&vein_pos.0, state);
         }
     }
-}
-
-fn grow_sculk_veins_in_proto_chunk(chunk: &mut crate::ProtoChunk, sculk_pos: BlockPos) {
-    for dir in pumpkin_data::BlockDirection::all() {
-        let vein_pos = sculk_pos.offset(dir.to_offset());
-        let Some(existing) = proto_chunk_state(chunk, vein_pos) else {
-            continue;
-        };
-        if let Some(state) = sculk_vein_state_with_face(existing, dir.opposite()) {
-            set_proto_chunk_state(chunk, vein_pos, state);
-        }
-    }
-}
-
-fn can_spread_from_proto_chunk(chunk: &crate::ProtoChunk, pos: BlockPos) -> bool {
-    let Some(state) = proto_chunk_state(chunk, pos) else {
-        return false;
-    };
-    let block_id = state.to_block_id();
-    if is_sculk_behaviour(block_id) {
-        return true;
-    }
-    if !state.to_state().is_air() && block_id != Block::WATER.id {
-        return false;
-    }
-
-    [
-        Vector3::new(1, 0, 0),
-        Vector3::new(-1, 0, 0),
-        Vector3::new(0, 1, 0),
-        Vector3::new(0, -1, 0),
-        Vector3::new(0, 0, 1),
-        Vector3::new(0, 0, -1),
-    ]
-    .into_iter()
-    .any(|offset| {
-        proto_chunk_state(chunk, pos.offset(offset))
-            .is_some_and(|state| state.to_state().is_solid())
-    })
 }

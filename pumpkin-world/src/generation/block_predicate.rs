@@ -56,13 +56,15 @@ pub struct MatchingBlocksBlockPredicate {
 impl MatchingBlocksBlockPredicate {
     pub fn test<T: GenerationCache>(&self, chunk: &T, pos: &BlockPos) -> bool {
         let block = self.offset.get_block(chunk, pos);
+        // Datapack names may lack the `minecraft:` prefix
+        // fall back to the raw string rather than panicking on `unwrap`
         match &self.blocks {
             MatchingBlocksWrapper::Single(single_block) => {
-                single_block.strip_prefix("minecraft:").unwrap() == block.name
+                single_block.strip_prefix("minecraft:").unwrap_or(single_block) == block.name
             }
             MatchingBlocksWrapper::Multiple(blocks) => blocks
                 .iter()
-                .map(|s| s.strip_prefix("minecraft:").unwrap())
+                .map(|s| s.strip_prefix("minecraft:").unwrap_or(s))
                 .contains(block.name),
         }
     }
@@ -89,11 +91,11 @@ impl MatchingFluidsBlockPredicate {
         let (fluid, _) = self.offset.get_fluid_and_fluid_state(chunk, pos);
         match &self.fluids {
             MatchingBlocksWrapper::Single(single_block) => {
-                single_block.strip_prefix("minecraft:").unwrap() == fluid.name
+                single_block.strip_prefix("minecraft:").unwrap_or(single_block) == fluid.name
             }
             MatchingBlocksWrapper::Multiple(blocks) => blocks
                 .iter()
-                .map(|s| s.strip_prefix("minecraft:").unwrap())
+                .map(|s| s.strip_prefix("minecraft:").unwrap_or(s))
                 .contains(fluid.name),
         }
     }

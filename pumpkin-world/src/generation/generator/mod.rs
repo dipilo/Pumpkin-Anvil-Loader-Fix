@@ -125,10 +125,10 @@ impl GeneratorInit for VanillaGenerator {
         let terrain_cache = TerrainCache::from_random(&random_config);
 
         let default_block = settings.default_block;
-        let base_router = match &datapack {
-            Some(d) => ProtoNoiseRouters::generate(&d.routers, &random_config),
-            None => ProtoNoiseRouters::generate(&vanilla_base, &random_config),
-        };
+        let base_router = datapack.as_ref().map_or_else(
+            || ProtoNoiseRouters::generate(&vanilla_base, &random_config),
+            |d| ProtoNoiseRouters::generate(&d.routers, &random_config),
+        );
         let datapack_biome_supplier = datapack.as_ref().and_then(|d| d.biome_placement);
         let uses_datapack_terrain = datapack.is_some();
         let biome_mixer_seed = crate::biome::hash_seed(seed.0);

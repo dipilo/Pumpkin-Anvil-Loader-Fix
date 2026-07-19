@@ -315,6 +315,26 @@ impl GenerationCache for Cache {
         }
     }
 
+    fn get_terrain_gen_biome_id(&self, x: i32, y: i32, z: i32) -> u8 {
+        let dx = (x >> 4) - self.x;
+        let dy = (z >> 4) - self.z;
+        let (dx, dy) = if dx < 0 || dy < 0 || dx >= self.size || dy >= self.size {
+            // Position is outside the cache — fall back to the centre chunk's biome
+            let mid = self.size / 2;
+            (mid, mid)
+        } else {
+            (dx, dy)
+        };
+        match &self.chunks[(dx * self.size + dy) as usize] {
+            // A fully-loaded neighbor may already carry the real id
+            Chunk::Level(data) => data
+                .section
+                .get_rough_biome_absolute_y((x & 15) as usize, y, (z & 15) as usize)
+                .unwrap_or(0),
+            Chunk::Proto(data) => data.get_terrain_gen_biome_id(x, y, z),
+        }
+    }
+
     fn get_blending_data(
         &self,
         chunk_x: i32,
@@ -330,6 +350,124 @@ impl GenerationCache for Cache {
         match &self.chunks[(dx * self.size + dz) as usize] {
             Chunk::Proto(chunk) => chunk.blending_data.as_ref(),
             Chunk::Level(data) => data.blending_data.as_ref(),
+        }
+    }
+
+    fn is_air(&self, local_pos: &Vector3<i32>) -> bool {
+        is_air(GenerationCache::get_block_state(self, local_pos))
+    }
+}
+
+/// A single [`ProtoChunk`] acting as its own 1×1 [`GenerationCache`]
+impl GenerationCache for ProtoChunk {
+    fn get_chunk_mut(&mut self, chunk_x: i32, chunk_z: i32) -> Option<&mut ProtoChunk> {
+        (chunk_x == self.x && chunk_z == self.z).then_some(self)
+    }
+
+    fn get_chunk(&self, chunk_x: i32, chunk_z: i32) -> Option<&ProtoChunk> {
+        (chunk_x == self.x && chunk_z == self.z).then_some(self)
+    }
+
+    fn try_get_proto_chunk(&self, chunk_x: i32, chunk_z: i32) -> Option<&ProtoChunk> {
+        (chunk_x == self.x && chunk_z == self.z).then_some(self)
+    }
+
+    fn get_center_chunk(&self) -> &ProtoChunk {
+        self
+    }
+
+    fn get_center_chunk_mut(&mut self) -> &mut ProtoChunk {
+        self
+    }
+
+    fn get_fluid_and_fluid_state(&self, pos: &Vector3<i32>) -> (Fluid, FluidState) {
+        let id = GenerationCache::get_block_state(self, pos);
+
+        let Some(fluid) = Fluid::from_state_id(id) else {
+            let block = Block::from_state_id(id);
+            if let Some(properties) = block.properties(id) {
+                for (name, value) in properties.to_props() {
+                    if name == "waterlogged" {
+                        if value == "true" {
+                            let fluid = Fluid::FLOWING_WATER;
+                            let state = fluid.states[0].clone();
+                            return (fluid, state);
+                        }
+
+                        break;
+                    }
+                }
+            }
+
+            let fluid = Fluid::EMPTY;
+            let state = fluid.states[0].clone();
+
+            return (fluid, state);
+        };
+
+        let state = fluid.states[0].clone();
+
+        (fluid.clone(), state)
+    }
+
+    fn get_block_state(&self, pos: &Vector3<i32>) -> BlockStateId {
+        if (pos.x >> 4) != self.x || (pos.z >> 4) != self.z {
+            return BlockStateId::AIR;
+        }
+        Self::get_block_state(self, pos)
+    }
+
+    fn set_block_state(&mut self, pos: &Vector3<i32>, block_state: &BlockState) {
+        if (pos.x >> 4) != self.x || (pos.z >> 4) != self.z {
+            return;
+        }
+        Self::set_block_state(self, pos.x, pos.y, pos.z, block_state);
+    }
+
+    fn add_block_entity(&mut self, pos: &Vector3<i32>, nbt: NbtCompound) {
+        if (pos.x >> 4) != self.x || (pos.z >> 4) != self.z {
+            return;
+        }
+        Self::add_block_entity(self, nbt);
+    }
+
+    fn get_top_y(&self, heightmap: &HeightMap, x: i32, z: i32) -> i32 {
+        Self::get_top_y(self, heightmap, x, z)
+    }
+
+    fn top_motion_blocking_block_height_exclusive(&self, x: i32, z: i32) -> i32 {
+        Self::top_motion_blocking_block_height_exclusive(self, x, z)
+    }
+
+    fn top_motion_blocking_block_no_leaves_height_exclusive(&self, x: i32, z: i32) -> i32 {
+        Self::top_motion_blocking_block_no_leaves_height_exclusive(self, x, z)
+    }
+
+    fn top_block_height_exclusive(&self, x: i32, z: i32) -> i32 {
+        Self::top_block_height_exclusive(self, x, z)
+    }
+
+    fn ocean_floor_height_exclusive(&self, x: i32, z: i32) -> i32 {
+        Self::ocean_floor_height_exclusive(self, x, z)
+    }
+
+    fn get_biome_for_terrain_gen(&self, x: i32, y: i32, z: i32) -> &'static Biome {
+        self.get_terrain_gen_biome(x, y, z)
+    }
+
+    fn get_terrain_gen_biome_id(&self, x: i32, y: i32, z: i32) -> u8 {
+        Self::get_terrain_gen_biome_id(self, x, y, z)
+    }
+
+    fn get_blending_data(
+        &self,
+        chunk_x: i32,
+        chunk_z: i32,
+    ) -> Option<&crate::generation::blender::blending_data::BlendingData> {
+        if chunk_x == self.x && chunk_z == self.z {
+            self.blending_data.as_ref()
+        } else {
+            None
         }
     }
 
@@ -454,5 +592,88 @@ impl Cache {
             }
             StagedChunkEnum::None => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod proto_chunk_cache_tests {
+    //! Exercises single-chunk [`GenerationCache`] impl on [`ProtoChunk`] used by jigsaw feature placement
+    use crate::chunk_system::chunk_state::StagedChunkEnum;
+    use crate::generation::proto_chunk::GenerationCache;
+    use crate::generation::{generator::WorldGenerator, get_world_gen, proto_chunk::ProtoChunk};
+    use pumpkin_data::Block;
+    use pumpkin_data::dimension::Dimension;
+    use pumpkin_util::math::vector3::Vector3;
+    use pumpkin_util::world_seed::Seed;
+
+    fn gen_chunk(cx: i32, cz: i32) -> ProtoChunk {
+        let world_gen = get_world_gen(Seed(0), Dimension::OVERWORLD, false, Vec::new(), String::new());
+        let mut chunk = ProtoChunk::new(cx, cz, &world_gen);
+        let WorldGenerator::Noise(generator) = &*world_gen else {
+            unreachable!()
+        };
+        chunk.step_to_biomes(generator);
+        chunk.stage = StagedChunkEnum::StructureReferences;
+        chunk.step_to_noise(generator);
+        chunk
+    }
+
+    #[test]
+    fn chunk_lookups_resolve_only_own_column() {
+        let (cx, cz) = (3, 5);
+        let mut chunk = gen_chunk(cx, cz);
+
+        assert!(GenerationCache::get_chunk(&chunk, cx, cz).is_some());
+        assert!(GenerationCache::get_chunk(&chunk, cx + 1, cz).is_none());
+        assert!(GenerationCache::try_get_proto_chunk(&chunk, cx, cz + 1).is_none());
+        assert!(GenerationCache::get_chunk_mut(&mut chunk, cx, cz).is_some());
+        assert!(GenerationCache::get_chunk_mut(&mut chunk, cx, cz + 2).is_none());
+    }
+
+    #[test]
+    fn out_of_chunk_reads_return_air_without_aliasing() {
+        let (cx, cz) = (3, 5);
+        let chunk = gen_chunk(cx, cz);
+
+        // In-bounds: trait accessor agrees with the inherent one
+        let in_pos = Vector3::new(cx * 16 + 8, 64, cz * 16 + 8);
+        assert_eq!(
+            GenerationCache::get_block_state(&chunk, &in_pos),
+            ProtoChunk::get_block_state(&chunk, &in_pos)
+        );
+
+        // Neighbouring chunk shares same local (x & 15, z & 15);
+        // inherent accessor would alias it into this column, trait accessor must not
+        let neighbour_pos = Vector3::new((cx + 1) * 16 + 8, 64, cz * 16 + 8);
+        assert_eq!(
+            GenerationCache::get_block_state(&chunk, &neighbour_pos),
+            pumpkin_data::BlockStateId::AIR
+        );
+        assert!(GenerationCache::is_air(&chunk, &neighbour_pos));
+    }
+
+    #[test]
+    fn out_of_chunk_writes_are_dropped() {
+        let (cx, cz) = (3, 5);
+        let mut chunk = gen_chunk(cx, cz);
+
+        let in_pos = Vector3::new(cx * 16 + 8, 70, cz * 16 + 8);
+        let before = GenerationCache::get_block_state(&chunk, &in_pos);
+
+        // Writing to neighbouring chunk at the same local column must not touch this chunk
+        let neighbour_pos = Vector3::new((cx + 2) * 16 + 8, 70, cz * 16 + 8);
+        GenerationCache::set_block_state(&mut chunk, &neighbour_pos, Block::BEDROCK.default_state);
+        assert_eq!(
+            GenerationCache::get_block_state(&chunk, &in_pos),
+            before,
+            "out-of-chunk write must not alias into this chunk"
+        );
+
+        // An in-bounds write is applied
+        GenerationCache::set_block_state(&mut chunk, &in_pos, Block::BEDROCK.default_state);
+        assert_eq!(
+            GenerationCache::get_block_state(&chunk, &in_pos),
+            Block::BEDROCK.default_state.id
+        );
     }
 }

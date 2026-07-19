@@ -181,10 +181,10 @@ impl WorldInfoWriter for AnvilLevelInfo {
         }
 
         // world_gen_settings.dat
-        if let Some(wgs) = &info.world_gen_settings {
-            if let Err(e) = write_world_gen_settings(level_folder, wgs) {
-                error!("Failed to write world_gen_settings.dat: {e}");
-            }
+        if let Some(wgs) = &info.world_gen_settings
+            && let Err(e) = write_world_gen_settings(level_folder, wgs)
+        {
+            error!("Failed to write world_gen_settings.dat: {e}");
         }
 
         // world_clocks.dat – persist the overworld day_time; preserve other

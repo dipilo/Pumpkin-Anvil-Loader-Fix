@@ -25,6 +25,12 @@ pub enum Category {
     Noise,
     /// `dimension` → dimension definition (generator + biome source)
     Dimension,
+    /// `worldgen/configured_feature` → a feature type + its config
+    ConfiguredFeature,
+    /// `worldgen/placed_feature` → a configured-feature ref + placement modifiers
+    PlacedFeature,
+    /// `worldgen/configured_carver` → a carver type + its config
+    ConfiguredCarver,
 }
 
 impl Category {
@@ -34,6 +40,9 @@ impl Category {
         Self::DensityFunction,
         Self::Noise,
         Self::Dimension,
+        Self::ConfiguredFeature,
+        Self::PlacedFeature,
+        Self::ConfiguredCarver,
     ];
 
     /// Path segments under `data/<namespace>/` that identify this category
@@ -43,6 +52,9 @@ impl Category {
             Self::DensityFunction => &["worldgen", "density_function"],
             Self::Noise => &["worldgen", "noise"],
             Self::Dimension => &["dimension"],
+            Self::ConfiguredFeature => &["worldgen", "configured_feature"],
+            Self::PlacedFeature => &["worldgen", "placed_feature"],
+            Self::ConfiguredCarver => &["worldgen", "configured_carver"],
         }
     }
 
@@ -54,6 +66,9 @@ impl Category {
             Self::DensityFunction => "density_function",
             Self::Noise => "noise",
             Self::Dimension => "dimension",
+            Self::ConfiguredFeature => "configured_feature",
+            Self::PlacedFeature => "placed_feature",
+            Self::ConfiguredCarver => "configured_carver",
         }
     }
 }
@@ -149,13 +164,13 @@ fn scan_zip(path: &Path, out: &mut RawWorldgen) {
     // Datapacks may hide per-version worldgen in `pack.mcmeta` overlays
     let overlay_dirs = {
         let mut mcmeta = String::new();
-        match archive.by_name("pack.mcmeta") {
-            Ok(mut f) => {
+        archive.by_name("pack.mcmeta").map_or_else(
+            |_| Vec::new(),
+            |mut f| {
                 let _ = f.read_to_string(&mut mcmeta);
                 parse_overlay_dirs(&mcmeta)
-            }
-            Err(_) => Vec::new(),
-        }
+            },
+        )
     };
 
     // Collect first, then insert in ascending priority
@@ -249,10 +264,8 @@ fn classify_with_overlays(
 /// Scan an unpacked datapack folder for worldgen JSON, including `pack.mcmeta`
 fn scan_folder(root: &Path, out: &mut RawWorldgen) {
     scan_data_dir(&root.join("data"), out);
-    let overlay_dirs = match std::fs::read_to_string(root.join("pack.mcmeta")) {
-        Ok(mcmeta) => parse_overlay_dirs(&mcmeta),
-        Err(_) => Vec::new(),
-    };
+    let overlay_dirs = std::fs::read_to_string(root.join("pack.mcmeta"))
+        .map_or_else(|_| Vec::new(), |mcmeta| parse_overlay_dirs(&mcmeta));
     for dir in overlay_dirs {
         let overlay_data = root.join(&dir).join("data");
         if overlay_data.is_dir() {

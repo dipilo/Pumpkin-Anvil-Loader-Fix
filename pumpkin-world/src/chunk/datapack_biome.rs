@@ -65,6 +65,8 @@ pub struct DatapackBiomeDef {
     pub temperature: f32,
     pub downfall: f32,
     pub has_precipitation: bool,
+    pub feature_ids: Vec<Vec<String>>,
+    pub carver_ids: Vec<String>,
 }
 
 /// Load biome definitions from the given datapack sources
@@ -259,6 +261,14 @@ fn insert_biome(
             .and_then(|o| o.get("has_precipitation"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
+        let feature_ids = obj
+            .and_then(|o| o.get("features"))
+            .map(parse_feature_steps)
+            .unwrap_or_default();
+        let carver_ids = obj
+            .and_then(|o| o.get("carvers"))
+            .map(parse_carver_refs)
+            .unwrap_or_default();
         out.insert(
             format!("{namespace}:{biome_path}"),
             DatapackBiomeDef {
@@ -266,8 +276,36 @@ fn insert_biome(
                 temperature: f32_field("temperature", 0.5),
                 downfall: f32_field("downfall", 0.5),
                 has_precipitation,
+                feature_ids,
+                carver_ids,
             },
         );
+    }
+}
+
+/// Parse biome JSON `features` array (`List<HolderSet<PlacedFeature>>`)
+/// into step-indexed list of placed-feature references
+fn parse_feature_steps(features: &Value) -> Vec<Vec<String>> {
+    let Some(steps) = features.as_array() else {
+        return Vec::new();
+    };
+    steps.iter().map(collect_holder_set).collect()
+}
+
+/// Parse biome JSON `carvers` field into flat list of references
+fn parse_carver_refs(carvers: &Value) -> Vec<String> {
+    collect_holder_set(carvers)
+}
+
+/// Collect string references from a vanilla `HolderSet` JSON value
+fn collect_holder_set(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(s) => vec![s.clone()],
+        Value::Array(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 

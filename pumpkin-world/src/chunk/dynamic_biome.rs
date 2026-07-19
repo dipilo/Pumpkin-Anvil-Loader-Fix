@@ -195,6 +195,20 @@ impl DynamicBiomeRegistry {
     pub fn has_definitions(&self) -> bool {
         !self.definitions.is_empty()
     }
+
+    #[must_use]
+    pub fn datapack_biome_defs_by_id(&self) -> Vec<(u8, DatapackBiomeDef)> {
+        self.definitions
+            .iter()
+            .filter_map(|(name, def)| {
+                let id = self.name_to_id.get(name).copied().or_else(|| {
+                    let stripped = name.strip_prefix("minecraft:").unwrap_or(name);
+                    Biome::from_name(stripped).map(|b| b.id)
+                })?;
+                Some((id, def.clone()))
+            })
+            .collect()
+    }
 }
 
 impl Default for DynamicBiomeRegistry {
@@ -672,6 +686,8 @@ mod tests {
             temperature: t,
             downfall: 0.5,
             has_precipitation: true,
+            feature_ids: Vec::new(),
+            carver_ids: Vec::new(),
         };
         // Includes a vanilla `minecraft:` override that must be skipped
         registry.definitions.insert("terralith:zebra".into(), def(0.5));

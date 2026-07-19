@@ -85,6 +85,7 @@ pub trait GenerationCache: HeightLimitView + BlockAccessor {
     fn ocean_floor_height_exclusive(&self, x: i32, z: i32) -> i32;
     fn is_air(&self, local_pos: &Vector3<i32>) -> bool;
     fn get_biome_for_terrain_gen(&self, x: i32, y: i32, z: i32) -> &'static Biome;
+    fn get_terrain_gen_biome_id(&self, x: i32, y: i32, z: i32) -> u8;
     fn get_blending_data(
         &self,
         chunk_x: i32,
@@ -1073,7 +1074,16 @@ impl ProtoChunk {
         let population_seed =
             Xoroshiro::get_population_seed(random_config.seed, start_block_x, start_block_z);
 
-        for step in 0..11 {
+        // When a datapack ships biome `features`, decorate via the global per-step feature ordering
+        let indexed = if crate::generation::datapack::features::has_active_features() {
+            crate::generation::datapack::features::snapshot_indexed_features()
+        } else {
+            None
+        };
+
+        let num_steps = indexed.as_ref().map_or(11, |i| i.num_steps().max(11));
+
+        for step in 0..num_steps {
             Self::generate_structure_step(
                 cache,
                 block_registry,
@@ -1082,40 +1092,97 @@ impl ProtoChunk {
                 random_config.seed as i64,
             );
 
-            let mut features_to_run = Vec::new();
-            for biome_id in &biomes_in_chunk {
-                if let Some(biome) = Biome::from_id(*biome_id)
-                    && let Some(features_at_step) = biome.features.get(step)
-                {
-                    for &feature_id in *features_at_step {
-                        features_to_run.push(feature_id);
+            if let Some(indexed) = &indexed {
+                Self::generate_indexed_features_step(
+                    cache,
+                    block_registry,
+                    indexed,
+                    step,
+                    population_seed,
+                    min_y,
+                    height,
+                    origin_pos,
+                    &biomes_in_chunk,
+                );
+            } else {
+                let mut features_to_run = Vec::new();
+                for biome_id in &biomes_in_chunk {
+                    if let Some(biome) = Biome::from_id(*biome_id)
+                        && let Some(features_at_step) = biome.features.get(step)
+                    {
+                        for &feature_id in *features_at_step {
+                            features_to_run.push(feature_id);
+                        }
                     }
                 }
-            }
 
-            features_to_run.sort_unstable();
-            features_to_run.dedup();
+                features_to_run.sort_unstable();
+                features_to_run.dedup();
 
-            for (p, feature_enum) in features_to_run.into_iter().enumerate() {
-                if let Some(feature) = PLACED_FEATURES.get(&feature_enum) {
-                    let decorator_seed = get_decorator_seed(population_seed, p as u64, step as u64);
-                    let mut random =
-                        RandomGenerator::Xoroshiro(Xoroshiro::from_seed(decorator_seed));
+                for (p, feature_enum) in features_to_run.into_iter().enumerate() {
+                    if let Some(feature) = PLACED_FEATURES.get(&feature_enum) {
+                        let decorator_seed =
+                            get_decorator_seed(population_seed, p as u64, step as u64);
+                        let mut random =
+                            RandomGenerator::Xoroshiro(Xoroshiro::from_seed(decorator_seed));
 
-                    feature.generate(
-                        cache,
-                        block_registry,
-                        min_y as i8,
-                        height as u16,
-                        feature_enum,
-                        &mut random,
-                        origin_pos,
-                    );
+                        feature.generate(
+                            cache,
+                            block_registry,
+                            min_y as i8,
+                            height as u16,
+                            feature_enum,
+                            &mut random,
+                            origin_pos,
+                        );
+                    }
                 }
             }
         }
 
         cache.get_center_chunk_mut().stage = StagedChunkEnum::Features;
+    }
+
+    /// Collect global indices of features contributed by chunk's biomes at this step, 
+    /// run them in ascending global-index order
+    /// seed each with `get_decorator_seed(population_seed, global_index, step)`
+    #[expect(clippy::too_many_arguments)]
+    fn generate_indexed_features_step<T: GenerationCache>(
+        cache: &mut T,
+        block_registry: &dyn WorldPortalExt,
+        indexed: &crate::generation::feature::indexed_features::IndexedFeatures,
+        step: usize,
+        population_seed: u64,
+        min_y: i32,
+        height: i32,
+        origin_pos: BlockPos,
+        biomes_in_chunk: &[u8],
+    ) {
+        // Inert placeholder id
+        const FEATURE_SENTINEL: pumpkin_data::placed_feature::PlacedFeature =
+            pumpkin_data::placed_feature::PlacedFeature::Acacia;
+
+        if step >= indexed.num_steps() {
+            return;
+        }
+
+        for global_index in indexed.step_feature_indices(biomes_in_chunk, step) {
+            let Some(feature) = indexed.feature_at(step, global_index) else {
+                continue;
+            };
+            let decorator_seed =
+                get_decorator_seed(population_seed, global_index as u64, step as u64);
+            let mut random = RandomGenerator::Xoroshiro(Xoroshiro::from_seed(decorator_seed));
+            feature.generate(
+                cache,
+                block_registry,
+                min_y as i8,
+                height as u16,
+                FEATURE_SENTINEL,
+                &mut random,
+                origin_pos,
+            );
+        }
     }
 
     fn generate_structure_step<T: GenerationCache>(
