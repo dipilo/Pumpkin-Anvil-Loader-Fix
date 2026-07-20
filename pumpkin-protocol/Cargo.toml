@@ -17,9 +17,9 @@ pumpkin-data = { workspace = true, features = ["packet", "item_id_remap", "entit
 pumpkin-macros.workspace = true
 pumpkin-world.workspace = true
 pumpkin-util.workspace = true
+serde = { workspace = true, features = ["derive"] }
 
 uuid.workspace = true
-serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net"] }
 bytes.workspace = true

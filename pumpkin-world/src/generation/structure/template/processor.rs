@@ -18,6 +18,7 @@ pub enum StructureProcessor {
     BlockRot { integrity: f32, blocks: BlockTag },
     Rules(Vec<ProcessorRule>),
     ProtectedBlocks(BlockTag),
+    Capped { limit: i32, delegate: Box<Self> },
 }
 
 /// A single rule of a `minecraft:rule` structure processor
@@ -31,13 +32,23 @@ pub struct ProcessorRule {
 pub enum BlockTag {
     AncientCityReplaceable,
     FeaturesCannotReplace,
+    TrailRuinsReplaceable,
+    Doors,
 }
 
 impl BlockTag {
     fn from_name(name: &str) -> Option<Self> {
         match name {
-            "#minecraft:ancient_city_replaceable" => Some(Self::AncientCityReplaceable),
-            "#minecraft:features_cannot_replace" => Some(Self::FeaturesCannotReplace),
+            "#minecraft:ancient_city_replaceable" | "minecraft:ancient_city_replaceable" => {
+                Some(Self::AncientCityReplaceable)
+            }
+            "#minecraft:features_cannot_replace" | "minecraft:features_cannot_replace" => {
+                Some(Self::FeaturesCannotReplace)
+            }
+            "#minecraft:trail_ruins_replaceable" | "minecraft:trail_ruins_replaceable" => {
+                Some(Self::TrailRuinsReplaceable)
+            }
+            "#minecraft:doors" | "minecraft:doors" => Some(Self::Doors),
             _ => None,
         }
     }
@@ -46,6 +57,8 @@ impl BlockTag {
         block_id.has_tag(match self {
             Self::AncientCityReplaceable => tag::Block::MINECRAFT_ANCIENT_CITY_REPLACEABLE,
             Self::FeaturesCannotReplace => tag::Block::MINECRAFT_FEATURES_CANNOT_REPLACE,
+            Self::TrailRuinsReplaceable => tag::Block::MINECRAFT_TRAIL_RUINS_REPLACEABLE,
+            Self::Doors => tag::Block::MINECRAFT_DOORS,
         })
     }
 }
@@ -86,6 +99,7 @@ impl StructureProcessor {
                 let existing = chunk.get_block_state(&pos).to_block_id();
                 (!blocks.contains(existing)).then_some(state)
             }
+            Self::Capped { limit: _, delegate } => delegate.process(chunk, pos, state),
         }
     }
 }
@@ -107,6 +121,8 @@ enum RawProcessor {
     Rule { rules: Vec<RawRule> },
     #[serde(rename = "minecraft:protected_blocks")]
     ProtectedBlocks { value: String },
+    #[serde(rename = "minecraft:capped")]
+    Capped { limit: i32, delegate: Box<Self> },
 }
 
 #[derive(Deserialize)]
@@ -194,6 +210,37 @@ fn resolve_block_tag(name: &str) -> Option<tag::Tag> {
     })
 }
 
+fn convert_raw_processor(raw: RawProcessor) -> Option<StructureProcessor> {
+    match raw {
+        RawProcessor::BlockRot {
+            integrity,
+            rottable_blocks,
+        } => BlockTag::from_name(&rottable_blocks)
+            .map(|blocks| StructureProcessor::BlockRot { integrity, blocks }),
+        RawProcessor::ProtectedBlocks { value } => {
+            BlockTag::from_name(&value).map(StructureProcessor::ProtectedBlocks)
+        }
+        RawProcessor::Rule { rules } => Some(StructureProcessor::Rules(
+            rules
+                .into_iter()
+                .filter_map(|rule| {
+                    Some(ProcessorRule {
+                        input_predicate: rule.input_predicate.build()?,
+                        location_predicate: rule.location_predicate.build()?,
+                        output_state: rule.output_state.get_state(),
+                    })
+                })
+                .collect(),
+        )),
+        RawProcessor::Capped { limit, delegate } => {
+            convert_raw_processor(*delegate).map(|proc| StructureProcessor::Capped {
+                limit,
+                delegate: Box::new(proc),
+            })
+        }
+    }
+}
+
 #[must_use]
 pub fn load_processor_list(name: &str) -> Arc<[StructureProcessor]> {
     static CACHE: LazyLock<dashmap::DashMap<String, Arc<[StructureProcessor]>>> =
@@ -218,28 +265,7 @@ pub fn load_processor_list(name: &str) -> Arc<[StructureProcessor]> {
     let processors = raw
         .processors
         .into_iter()
-        .filter_map(|processor| match processor {
-            RawProcessor::BlockRot {
-                integrity,
-                rottable_blocks,
-            } => BlockTag::from_name(&rottable_blocks)
-                .map(|blocks| StructureProcessor::BlockRot { integrity, blocks }),
-            RawProcessor::ProtectedBlocks { value } => {
-                BlockTag::from_name(&value).map(StructureProcessor::ProtectedBlocks)
-            }
-            RawProcessor::Rule { rules } => Some(StructureProcessor::Rules(
-                rules
-                    .into_iter()
-                    .filter_map(|rule| {
-                        Some(ProcessorRule {
-                            input_predicate: rule.input_predicate.build()?,
-                            location_predicate: rule.location_predicate.build()?,
-                            output_state: rule.output_state.get_state(),
-                        })
-                    })
-                    .collect(),
-            )),
-        })
+        .filter_map(convert_raw_processor)
         .collect::<Arc<[_]>>();
     CACHE.insert(name.to_owned(), Arc::clone(&processors));
     processors
@@ -275,5 +301,18 @@ mod tests {
             StructureProcessor::Rules(rules) => assert_eq!(rules.len(), 4),
             _ => panic!("expected a rule processor"),
         }
+    }
+
+    #[test]
+    fn parses_street_savanna_processor_list() {
+        assert_eq!(load_processor_list("minecraft:street_savanna").len(), 1);
+    }
+
+    #[test]
+    fn parses_trail_ruins_processor_lists() {
+        assert_eq!(
+            load_processor_list("minecraft:trail_ruins_houses_archaeology").len(),
+            3
+        );
     }
 }

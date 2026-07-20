@@ -104,8 +104,8 @@ strip = false
 
 [workspace.dependencies]
 serde_json5 = "0.2.1"
-tokio = { version = "1.52", default-features = false }
-syn = { version = "2.0", default-features = false, features = ["printing"] }
+tokio = { version = "1.53", default-features = false }
+syn = { version = "3.0", default-features = false, features = ["full", "parsing", "printing", "proc-macro", "clone-impls", "derive"] }
 
 thiserror = { version = "2.0", default-features = false }
 
@@ -116,7 +116,7 @@ futures = { version = "0.3", default-features = false, features = ["executor"] }
 rayon = { version = "1.12", default-features = false }
 crossbeam = { version = "0.8", default-features = false, features = ["std"] }
 
-uuid = { version = "1.23", default-features = false, features = ["serde", "v3", "v4", "std"] }
+uuid = { version = "1.24", default-features = false, features = ["serde", "v3", "v4", "std"] }
 serde = { version = "1.0", default-features = false, features = ["derive", "std"] }
 serde_repr = { version = "0.1", default-features = false }
 serde_json = { version = "1.0", default-features = false, features = ["std"] }
@@ -126,7 +126,7 @@ proc-macro-error2 = { version = "2", default-features = false }
 aes = { version = "0.9", default-features = false }
 async-compression = { version = "0.4.42", default-features = false }
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
-bitflags = { version = "2.13.0", default-features = false, features = ["std"] }
+bitflags = { version = "2.13.1", default-features = false, features = ["std"] }
 cesu8 = { version = "1.1", default-features = false }
 cfb8 = { version = "0.9", default-features = false }
 ctr = { version = "0.10.1", default-features = false }

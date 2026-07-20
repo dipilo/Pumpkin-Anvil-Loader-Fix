@@ -1,11 +1,16 @@
 use pumpkin_data::packet::serverbound::CONFIG_CLIENT_INFORMATION;
 use pumpkin_macros::java_packet;
-use serde::Serialize;
 
 use crate::VarInt;
 
+use crate::{
+    ServerPacket,
+    ser::{NetworkReadExt, ReadingError},
+};
+use pumpkin_util::version::JavaMinecraftVersion;
+use std::io::Read;
+
 /// Sent by the client to inform the server about its local settings
-#[derive(serde::Deserialize, Serialize)]
 #[java_packet(CONFIG_CLIENT_INFORMATION)]
 pub struct SClientInformationConfig {
     /// The language code used by the client (e.g., "`en_us`")
@@ -24,4 +29,19 @@ pub struct SClientInformationConfig {
     pub text_filtering: bool,
     /// Whether the player should appear in the server's online player list
     pub server_listing: bool,
+}
+
+impl ServerPacket for SClientInformationConfig {
+    fn read(mut bytebuf: impl Read, _version: &JavaMinecraftVersion) -> Result<Self, ReadingError> {
+        Ok(Self {
+            locale: bytebuf.get_str()?.into_string(),
+            view_distance: bytebuf.get_i8()?,
+            chat_mode: bytebuf.get_var_int()?,
+            chat_colors: bytebuf.get_bool()?,
+            skin_parts: bytebuf.get_u8()?,
+            main_hand: bytebuf.get_var_int()?,
+            text_filtering: bytebuf.get_bool()?,
+            server_listing: bytebuf.get_bool()?,
+        })
+    }
 }

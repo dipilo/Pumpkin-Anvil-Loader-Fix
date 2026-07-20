@@ -349,10 +349,8 @@ mod tests {
     use pumpkin_data::packet::clientbound::STATUS_STATUS_RESPONSE;
     use pumpkin_macros::java_packet;
     use pumpkin_util::version::JavaMinecraftVersion;
-    use serde::Serialize;
 
     /// Define a custom packet for testing maximum packet size
-    #[derive(Serialize)]
     #[java_packet(STATUS_STATUS_RESPONSE)]
     pub struct MaxSizePacket {
         data: Vec<u8>,
@@ -363,6 +361,19 @@ mod tests {
             Self {
                 data: vec![0xAB; size], // Fill with arbitrary data
             }
+        }
+    }
+
+    impl ClientPacket for MaxSizePacket {
+        fn write_packet_data(
+            &self,
+            mut write: impl std::io::Write,
+            _version: &JavaMinecraftVersion,
+        ) -> Result<(), crate::WritingError> {
+            write
+                .write_all(&self.data)
+                .map_err(crate::WritingError::IoError)?;
+            Ok(())
         }
     }
 

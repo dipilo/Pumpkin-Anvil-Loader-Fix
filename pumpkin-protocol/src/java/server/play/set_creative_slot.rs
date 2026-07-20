@@ -20,7 +20,7 @@ impl ServerPacket for SSetCreativeSlot {
         _version: &JavaMinecraftVersion,
     ) -> Result<Self, ReadingError> {
         let slot = read.get_i16_be()?;
-        let clicked_item = ItemStackSerializer::read_length_prefixed_optional(read)?;
+        let clicked_item = ItemStackSerializer::read_length_prefixed_optional(&mut read)?;
         Ok(Self { slot, clicked_item })
     }
 }

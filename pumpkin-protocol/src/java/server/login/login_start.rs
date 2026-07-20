@@ -3,7 +3,6 @@ use std::io::Read;
 use pumpkin_data::packet::serverbound::LOGIN_HELLO;
 use pumpkin_macros::java_packet;
 use pumpkin_util::version::JavaMinecraftVersion;
-use serde::Serialize;
 
 use crate::{
     ServerPacket,
@@ -11,7 +10,6 @@ use crate::{
 };
 
 #[java_packet(LOGIN_HELLO)]
-#[derive(Serialize)]
 pub struct SLoginStart {
     pub name: Box<str>, // 16
     pub uuid: uuid::Uuid,
