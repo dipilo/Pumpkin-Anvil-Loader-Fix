@@ -102,6 +102,8 @@ impl MoveControlTrait for MoveControl {
                 .movement_input
                 .store(Vector3::new(0.0, 0.0, 0.0));
         }
+
+        // Navigator owns movement input while this controller waits.
     }
 }
 
